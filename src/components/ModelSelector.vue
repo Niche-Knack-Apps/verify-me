@@ -21,22 +21,6 @@ const filteredModels = computed(() => {
   return modelsStore.models;
 });
 
-function statusLabel(status: TTSModel['status']): string {
-  switch (status) {
-    case 'available': return 'Available';
-    case 'downloadable': return 'Download';
-    default: return '';
-  }
-}
-
-function statusClass(status: TTSModel['status']): string {
-  switch (status) {
-    case 'available': return 'status-available';
-    case 'downloadable': return 'status-download';
-    default: return '';
-  }
-}
-
 onMounted(() => {
   if (modelsStore.models.length === 0) {
     modelsStore.loadModels();
@@ -46,7 +30,7 @@ onMounted(() => {
 
 <template>
   <div class="model-selector">
-    <label class="selector-label">Model</label>
+    <label class="selector-label">&gt; MODEL</label>
     <div class="selector-list">
       <div
         v-for="model in filteredModels"
@@ -56,14 +40,15 @@ onMounted(() => {
         @click="model.status === 'available' && modelsStore.downloading !== model.id && emit('update:modelValue', model.id)"
       >
         <div class="model-info">
+          <span class="model-indicator">{{ modelValue === model.id ? '[>]' : '[ ]' }}</span>
           <span class="model-name">{{ model.name }}</span>
           <span class="model-size">{{ model.size }}</span>
         </div>
         <span v-if="modelsStore.downloading === model.id" class="download-progress">
           {{ Math.round(modelsStore.downloadProgress[model.id] ?? 0) }}%
         </span>
-        <span v-else-if="model.status === 'available'" class="model-status" :class="statusClass(model.status)">
-          {{ statusLabel(model.status) }}
+        <span v-else-if="model.status === 'available'" class="model-status">
+          READY
         </span>
         <button
           v-else
@@ -71,14 +56,11 @@ onMounted(() => {
           @click.stop="modelsStore.downloadModel(model.id)"
           title="Download model"
         >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-          </svg>
-          Download
+          [GET]
         </button>
       </div>
       <div v-if="filteredModels.length === 0" class="no-models">
-        No models available
+        NO MODELS AVAILABLE
       </div>
     </div>
   </div>
@@ -92,15 +74,15 @@ onMounted(() => {
 }
 
 .selector-label {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: #9ca3af;
+  font-size: 16px;
+  color: var(--crt-dim);
+  letter-spacing: 0.05em;
 }
 
 .selector-list {
   display: flex;
   flex-direction: column;
-  gap: 0.375rem;
+  gap: 0.25rem;
   max-height: 12rem;
   overflow-y: auto;
 }
@@ -109,67 +91,63 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.625rem 0.75rem;
+  padding: 0.5rem 0.75rem;
   min-height: 44px;
-  background: var(--color-surface);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 0.375rem;
+  background: transparent;
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
   cursor: pointer;
   transition: border-color 0.15s;
 }
 .model-item:hover {
-  border-color: rgba(255, 255, 255, 0.25);
+  border-color: var(--crt-text);
 }
 .model-item.selected {
-  border-color: var(--color-accent);
-  background: rgba(34, 211, 238, 0.08);
+  border-color: var(--crt-bright);
+  background: rgba(51, 255, 0, 0.05);
 }
 
 .model-info {
   display: flex;
-  flex-direction: column;
-  gap: 0.125rem;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.model-indicator {
+  color: var(--crt-bright);
+  flex-shrink: 0;
 }
 
 .model-name {
-  font-size: 0.875rem;
-  font-weight: 500;
+  font-size: 18px;
+  color: var(--crt-text);
 }
 
 .model-size {
-  font-size: 0.75rem;
-  color: #6b7280;
+  font-size: 16px;
+  color: var(--crt-dim);
 }
 
 .model-status {
-  font-size: 0.75rem;
-  padding: 0.125rem 0.5rem;
-  border-radius: 9999px;
-}
-.status-available {
-  background: rgba(234, 179, 8, 0.15);
-  color: #eab308;
-}
-.status-download {
-  color: #6b7280;
+  font-size: 14px;
+  color: var(--crt-dim);
+  letter-spacing: 0.05em;
 }
 
 .download-btn {
-  display: flex;
-  align-items: center;
-  gap: 0.375rem;
-  padding: 0.375rem 0.75rem;
-  min-height: 36px;
-  font-size: 0.75rem;
+  padding: 0.25rem 0.75rem;
+  min-height: 32px;
+  font-family: 'VT323', monospace;
+  font-size: 16px;
   background: transparent;
-  color: var(--color-accent);
-  border: 1px solid var(--color-accent);
-  border-radius: 0.375rem;
+  color: var(--crt-bright);
+  border: 1px solid var(--crt-bright);
+  border-radius: 0;
   cursor: pointer;
   transition: background 0.15s;
 }
 .download-btn:hover {
-  background: rgba(34, 211, 238, 0.1);
+  background: rgba(51, 255, 0, 0.08);
 }
 
 .model-item.disabled {
@@ -178,14 +156,14 @@ onMounted(() => {
 }
 
 .download-progress {
-  font-size: 0.75rem;
-  color: var(--color-accent);
+  font-size: 16px;
+  color: var(--crt-bright);
 }
 
 .no-models {
   padding: 1rem;
   text-align: center;
-  color: #6b7280;
-  font-size: 0.875rem;
+  color: var(--crt-dim);
+  font-size: 16px;
 }
 </style>

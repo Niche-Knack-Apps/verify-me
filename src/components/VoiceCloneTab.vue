@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { useTTSStore } from '@/stores/tts';
 import ModelSelector from '@/components/ModelSelector.vue';
 import AudioPlayer from '@/components/AudioPlayer.vue';
@@ -35,10 +36,18 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+// Block-character level meter: ████░░░░░░
+const levelMeter = computed(() => {
+  const total = 20;
+  const filled = Math.round(tts.currentLevel * total);
+  const empty = total - filled;
+  return '\u2588'.repeat(filled) + '\u2591'.repeat(empty);
+});
+
 function levelColor(level: number): string {
-  if (level > 0.9) return '#ef4444';
-  if (level > 0.75) return '#eab308';
-  return '#22c55e';
+  if (level > 0.9) return 'var(--crt-error)';
+  if (level > 0.75) return 'var(--crt-warn)';
+  return 'var(--crt-text)';
 }
 </script>
 
@@ -46,26 +55,19 @@ function levelColor(level: number): string {
   <div class="clone-tab">
     <!-- Reference Audio -->
     <div class="reference-section">
-      <label class="field-label">Reference Audio</label>
+      <label class="field-label">&gt; REFERENCE AUDIO</label>
 
       <!-- Recording active -->
       <div v-if="tts.isRecording" class="recording-panel">
         <div class="recording-header">
-          <span class="recording-dot" />
-          <span class="recording-label">Recording</span>
+          <span class="recording-indicator">[ REC ]</span>
           <span class="recording-time">{{ formatTime(tts.recordingDuration) }}</span>
         </div>
-        <div class="level-meter">
-          <div
-            class="level-fill"
-            :style="{ width: `${tts.currentLevel * 100}%`, backgroundColor: levelColor(tts.currentLevel) }"
-          />
+        <div class="level-meter" :style="{ color: levelColor(tts.currentLevel) }">
+          {{ levelMeter }}
         </div>
         <button class="stop-btn" @click="tts.stopRecording()">
-          <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-            <rect x="6" y="6" width="12" height="12" rx="1" />
-          </svg>
-          <span>Stop Recording</span>
+          [ STOP RECORDING ]
         </button>
       </div>
 
@@ -73,20 +75,14 @@ function levelColor(level: number): string {
       <template v-else>
         <div class="reference-controls">
           <button class="upload-btn" @click="selectReferenceAudio">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-            </svg>
-            <span>Choose Audio File</span>
+            [ CHOOSE FILE ]
           </button>
           <button class="record-btn" @click="tts.startRecording()">
-            <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-              <circle cx="12" cy="12" r="6" />
-            </svg>
-            <span>Record</span>
+            [ RECORD ]
           </button>
         </div>
         <p v-if="tts.referenceAudioPath" class="reference-file">
-          {{ getFileName(tts.referenceAudioPath) }}
+          &gt; {{ getFileName(tts.referenceAudioPath) }}
         </p>
       </template>
     </div>
@@ -94,7 +90,7 @@ function levelColor(level: number): string {
     <ModelSelector v-model:modelValue="tts.selectedModelId" :model-filter="cloneFilter" />
 
     <div class="input-section">
-      <label class="field-label">Text to synthesize</label>
+      <label class="field-label">&gt; TEXT TO SYNTHESIZE</label>
       <textarea
         v-model="tts.text"
         class="text-input"
@@ -108,14 +104,11 @@ function levelColor(level: number): string {
       :disabled="tts.isGenerating || !tts.text.trim() || !tts.referenceAudioPath"
       @click="tts.cloneVoice()"
     >
-      <svg v-if="tts.isGenerating" class="spinner w-5 h-5" viewBox="0 0 24 24" fill="none">
-        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-dasharray="31.4 31.4" />
-      </svg>
-      <span v-if="tts.isGenerating">Generating...</span>
-      <span v-else>Clone Voice</span>
+      <span v-if="tts.isGenerating" class="spinner-text">[||||] GENERATING...</span>
+      <span v-else>[ CLONE VOICE ]</span>
     </button>
 
-    <p v-if="tts.error" class="error-msg">{{ tts.error }}</p>
+    <p v-if="tts.error" class="error-msg">ERROR: {{ tts.error }}</p>
 
     <AudioPlayer
       :audio-src="tts.outputAudioPath ?? undefined"
@@ -133,10 +126,10 @@ function levelColor(level: number): string {
 
 .field-label {
   display: block;
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: #9ca3af;
+  font-size: 16px;
+  color: var(--crt-dim);
   margin-bottom: 0.375rem;
+  letter-spacing: 0.05em;
 }
 
 .reference-section {
@@ -158,25 +151,29 @@ function levelColor(level: number): string {
   gap: 0.5rem;
   padding: 0.625rem 1rem;
   min-height: 44px;
-  font-size: 0.875rem;
-  background: var(--color-surface);
-  color: var(--color-text);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 0.375rem;
+  font-family: 'VT323', monospace;
+  font-size: 18px;
+  background: transparent;
+  color: var(--crt-text);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
   cursor: pointer;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, color 0.15s;
 }
 .upload-btn:hover,
 .record-btn:hover {
-  border-color: var(--color-accent);
+  border-color: var(--crt-bright);
+  color: var(--crt-bright);
+  text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
 }
 
 .reference-file {
-  font-size: 0.8rem;
-  color: var(--color-accent);
+  font-size: 16px;
+  color: var(--crt-bright);
   padding: 0.375rem 0.75rem;
-  background: rgba(34, 211, 238, 0.08);
-  border-radius: 0.25rem;
+  background: rgba(51, 255, 0, 0.05);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
   word-break: break-all;
 }
 
@@ -186,130 +183,118 @@ function levelColor(level: number): string {
   flex-direction: column;
   gap: 0.75rem;
   padding: 0.875rem;
-  background: var(--color-surface);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  border-radius: 0.375rem;
+  background: var(--crt-surface);
+  border: 1px solid rgba(255, 51, 51, 0.4);
+  border-radius: 0;
 }
 
 .recording-header {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  justify-content: space-between;
 }
 
-.recording-dot {
-  width: 0.625rem;
-  height: 0.625rem;
-  border-radius: 50%;
-  background: #ef4444;
-  animation: pulse-dot 1.2s ease-in-out infinite;
-}
-
-@keyframes pulse-dot {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
-}
-
-.recording-label {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: #ef4444;
+.recording-indicator {
+  color: var(--crt-error);
+  animation: blink-cursor 1.2s step-end infinite;
+  text-shadow: 0 0 8px rgba(255, 51, 51, 0.5);
 }
 
 .recording-time {
-  margin-left: auto;
-  font-size: 0.875rem;
   font-variant-numeric: tabular-nums;
-  color: #d1d5db;
+  color: var(--crt-text);
 }
 
 .level-meter {
-  height: 6px;
-  background: #374151;
-  border-radius: 3px;
-  overflow: hidden;
-}
-
-.level-fill {
-  height: 100%;
-  border-radius: 3px;
-  transition: width 75ms linear, background-color 150ms;
-  min-width: 2px;
+  font-size: 14px;
+  letter-spacing: 0;
+  line-height: 1;
+  text-shadow: none;
+  transition: color 150ms;
 }
 
 .stop-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.5rem;
   padding: 0.625rem 1rem;
   min-height: 44px;
-  font-size: 0.875rem;
-  background: rgba(239, 68, 68, 0.1);
-  color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  border-radius: 0.375rem;
+  font-family: 'VT323', monospace;
+  font-size: 18px;
+  background: transparent;
+  color: var(--crt-error);
+  border: 1px solid rgba(255, 51, 51, 0.4);
+  border-radius: 0;
   cursor: pointer;
   transition: background 0.15s;
 }
 .stop-btn:hover {
-  background: rgba(239, 68, 68, 0.2);
+  background: rgba(255, 51, 51, 0.1);
+  text-shadow: 0 0 8px rgba(255, 51, 51, 0.4);
 }
 
 .text-input {
   width: 100%;
   padding: 0.75rem;
-  background: var(--color-surface);
-  color: var(--color-text);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 0.375rem;
-  font-size: 0.9rem;
+  background: var(--crt-bg);
+  color: var(--crt-text);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
+  font-family: 'VT323', monospace;
+  font-size: 18px;
   line-height: 1.5;
   resize: vertical;
-  font-family: inherit;
+  text-shadow: var(--crt-glow);
+  caret-color: var(--crt-bright);
 }
 .text-input:focus {
   outline: none;
-  border-color: var(--color-accent);
+  border-color: var(--crt-bright);
+  box-shadow: 0 0 8px rgba(51, 255, 0, 0.2);
+}
+.text-input::placeholder {
+  color: var(--crt-dim);
+  text-shadow: none;
 }
 
 .generate-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.5rem;
   width: 100%;
   padding: 0.75rem;
   min-height: 48px;
-  font-size: 1rem;
-  font-weight: 600;
-  background: var(--color-accent);
-  color: #111827;
-  border: none;
-  border-radius: 0.5rem;
+  font-family: 'VT323', monospace;
+  font-size: 22px;
+  background: transparent;
+  color: var(--crt-bright);
+  border: 1px solid var(--crt-bright);
+  border-radius: 0;
   cursor: pointer;
-  transition: opacity 0.15s;
+  letter-spacing: 0.1em;
+  transition: background 0.15s, text-shadow 0.15s;
+  text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
 }
 .generate-btn:hover:not(:disabled) {
-  opacity: 0.9;
+  background: rgba(51, 255, 0, 0.08);
+  text-shadow: 0 0 12px rgba(51, 255, 0, 0.6);
 }
 .generate-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
+  text-shadow: none;
 }
 
-.spinner {
-  animation: spin 1s linear infinite;
-}
-@keyframes spin {
-  to { transform: rotate(360deg); }
+.spinner-text {
+  animation: blink-cursor 0.8s step-end infinite;
 }
 
 .error-msg {
-  color: #f87171;
-  font-size: 0.875rem;
+  color: var(--crt-error);
+  font-size: 16px;
   padding: 0.5rem 0.75rem;
-  background: rgba(248, 113, 113, 0.1);
-  border-radius: 0.375rem;
+  background: rgba(255, 51, 51, 0.08);
+  border: 1px solid rgba(255, 51, 51, 0.3);
+  border-radius: 0;
 }
 </style>

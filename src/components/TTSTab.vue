@@ -11,7 +11,7 @@ const tts = useTTSStore();
     <ModelSelector v-model:modelValue="tts.selectedModelId" />
 
     <div class="input-section">
-      <label class="field-label">Text</label>
+      <label class="field-label">&gt; TEXT INPUT</label>
       <textarea
         v-model="tts.text"
         class="text-input"
@@ -22,7 +22,7 @@ const tts = useTTSStore();
 
     <div class="controls-row">
       <div class="control-group">
-        <label class="field-label" for="voice-select">Voice</label>
+        <label class="field-label" for="voice-select">&gt; VOICE</label>
         <select id="voice-select" v-model="tts.selectedVoice" class="voice-select">
           <option v-for="v in tts.voices" :key="v.id" :value="v.id">{{ v.name }}</option>
         </select>
@@ -30,7 +30,7 @@ const tts = useTTSStore();
 
       <div class="control-group">
         <label class="field-label">
-          Speed: {{ tts.speed.toFixed(1) }}x
+          &gt; SPEED: {{ tts.speed.toFixed(1) }}x
         </label>
         <input
           type="range"
@@ -44,12 +44,12 @@ const tts = useTTSStore();
     </div>
 
     <div v-if="tts.selectedModel?.supportsVoicePrompt" class="input-section">
-      <label class="field-label">Voice Prompt <span class="optional-tag">optional</span></label>
+      <label class="field-label">&gt; VOICE PROMPT <span class="optional-tag">(optional)</span></label>
       <input
         type="text"
         v-model="tts.voicePrompt"
         class="voice-prompt-input"
-        placeholder="Describe the voice, e.g. 'warm female narrator' or 'deep male with British accent'"
+        placeholder="Describe the voice, e.g. 'warm female narrator'"
       />
     </div>
 
@@ -58,14 +58,11 @@ const tts = useTTSStore();
       :disabled="tts.isGenerating || !tts.text.trim()"
       @click="tts.generateSpeech()"
     >
-      <svg v-if="tts.isGenerating" class="spinner w-5 h-5" viewBox="0 0 24 24" fill="none">
-        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-dasharray="31.4 31.4" />
-      </svg>
-      <span v-if="tts.isGenerating">Generating...</span>
-      <span v-else>Generate Speech</span>
+      <span v-if="tts.isGenerating" class="spinner-text">[||||] GENERATING...</span>
+      <span v-else>[ GENERATE SPEECH ]</span>
     </button>
 
-    <p v-if="tts.error" class="error-msg">{{ tts.error }}</p>
+    <p v-if="tts.error" class="error-msg">ERROR: {{ tts.error }}</p>
 
     <AudioPlayer
       :audio-src="tts.outputAudioPath ?? undefined"
@@ -83,33 +80,39 @@ const tts = useTTSStore();
 
 .field-label {
   display: block;
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: #9ca3af;
+  font-size: 16px;
+  color: var(--crt-dim);
   margin-bottom: 0.375rem;
+  letter-spacing: 0.05em;
 }
 
 .optional-tag {
-  font-weight: 400;
-  font-size: 0.75rem;
-  color: #6b7280;
+  font-size: 14px;
+  color: var(--crt-dim);
 }
 
 .text-input {
   width: 100%;
   padding: 0.75rem;
-  background: var(--color-surface);
-  color: var(--color-text);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 0.375rem;
-  font-size: 0.9rem;
+  background: var(--crt-bg);
+  color: var(--crt-text);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
+  font-family: 'VT323', monospace;
+  font-size: 18px;
   line-height: 1.5;
   resize: vertical;
-  font-family: inherit;
+  text-shadow: var(--crt-glow);
+  caret-color: var(--crt-bright);
 }
 .text-input:focus {
   outline: none;
-  border-color: var(--color-accent);
+  border-color: var(--crt-bright);
+  box-shadow: 0 0 8px rgba(51, 255, 0, 0.2);
+}
+.text-input::placeholder {
+  color: var(--crt-dim);
+  text-shadow: none;
 }
 
 .controls-row {
@@ -127,80 +130,87 @@ const tts = useTTSStore();
   width: 100%;
   padding: 0.625rem 0.75rem;
   min-height: 44px;
-  background: var(--color-surface);
-  color: var(--color-text);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 0.375rem;
-  font-size: 0.875rem;
+  background: var(--crt-bg);
+  color: var(--crt-text);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
+  font-family: 'VT323', monospace;
+  font-size: 18px;
   cursor: pointer;
+  text-shadow: var(--crt-glow);
 }
 .voice-select:focus {
   outline: none;
-  border-color: var(--color-accent);
+  border-color: var(--crt-bright);
+  box-shadow: 0 0 8px rgba(51, 255, 0, 0.2);
 }
 
 .voice-prompt-input {
   width: 100%;
   padding: 0.625rem 0.75rem;
   min-height: 44px;
-  background: var(--color-surface);
-  color: var(--color-text);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 0.375rem;
-  font-size: 0.875rem;
-  font-family: inherit;
+  background: var(--crt-bg);
+  color: var(--crt-text);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
+  font-family: 'VT323', monospace;
+  font-size: 18px;
+  text-shadow: var(--crt-glow);
+  caret-color: var(--crt-bright);
 }
 .voice-prompt-input:focus {
   outline: none;
-  border-color: var(--color-accent);
+  border-color: var(--crt-bright);
+  box-shadow: 0 0 8px rgba(51, 255, 0, 0.2);
 }
 .voice-prompt-input::placeholder {
-  color: #6b7280;
+  color: var(--crt-dim);
+  text-shadow: none;
 }
 
 .speed-slider {
   width: 100%;
   min-height: 44px;
-  accent-color: var(--color-accent);
 }
 
 .generate-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.5rem;
   width: 100%;
   padding: 0.75rem;
   min-height: 48px;
-  font-size: 1rem;
-  font-weight: 600;
-  background: var(--color-accent);
-  color: #111827;
-  border: none;
-  border-radius: 0.5rem;
+  font-family: 'VT323', monospace;
+  font-size: 22px;
+  background: transparent;
+  color: var(--crt-bright);
+  border: 1px solid var(--crt-bright);
+  border-radius: 0;
   cursor: pointer;
-  transition: opacity 0.15s;
+  letter-spacing: 0.1em;
+  transition: background 0.15s, text-shadow 0.15s;
+  text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
 }
 .generate-btn:hover:not(:disabled) {
-  opacity: 0.9;
+  background: rgba(51, 255, 0, 0.08);
+  text-shadow: 0 0 12px rgba(51, 255, 0, 0.6);
 }
 .generate-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
+  text-shadow: none;
 }
 
-.spinner {
-  animation: spin 1s linear infinite;
-}
-@keyframes spin {
-  to { transform: rotate(360deg); }
+.spinner-text {
+  animation: blink-cursor 0.8s step-end infinite;
 }
 
 .error-msg {
-  color: #f87171;
-  font-size: 0.875rem;
+  color: var(--crt-error);
+  font-size: 16px;
   padding: 0.5rem 0.75rem;
-  background: rgba(248, 113, 113, 0.1);
-  border-radius: 0.375rem;
+  background: rgba(255, 51, 51, 0.08);
+  border: 1px solid rgba(255, 51, 51, 0.3);
+  border-radius: 0;
 }
 </style>

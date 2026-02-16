@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onUnmounted } from 'vue';
+import { ref, computed, watch, onUnmounted } from 'vue';
 
 const props = defineProps<{
   audioSrc?: string;
@@ -20,6 +20,16 @@ function formatTime(seconds: number): string {
   const s = Math.floor(seconds % 60);
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
+
+// ASCII progress bar: [████████░░░░░░░░░░░░]
+const progressBar = computed(() => {
+  const total = 20;
+  const filled = duration.value > 0
+    ? Math.round((currentTime.value / duration.value) * total)
+    : 0;
+  const empty = total - filled;
+  return '\u2588'.repeat(filled) + '\u2591'.repeat(empty);
+});
 
 function togglePlay() {
   if (!audioEl.value) return;
@@ -83,48 +93,47 @@ onUnmounted(() => {
       @ended="onEnded"
     />
 
-    <button class="play-btn" @click="togglePlay" :title="isPlaying ? 'Pause' : 'Play'">
-      <!-- Play icon -->
-      <svg v-if="!isPlaying" class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-        <path d="M8 5v14l11-7z" />
-      </svg>
-      <!-- Pause icon -->
-      <svg v-else class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-        <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
-      </svg>
-    </button>
+    <div class="player-row">
+      <button class="play-btn" @click="togglePlay" :title="isPlaying ? 'Pause' : 'Play'">
+        {{ isPlaying ? '[||]' : '[>]' }}
+      </button>
 
-    <input
-      type="range"
-      class="seek-bar"
-      min="0"
-      max="100"
-      step="0.1"
-      :value="seekValue"
-      @input="onSeek"
-    />
+      <div class="progress-section">
+        <div class="progress-bar">{{ progressBar }}</div>
+        <input
+          type="range"
+          class="seek-bar"
+          min="0"
+          max="100"
+          step="0.1"
+          :value="seekValue"
+          @input="onSeek"
+        />
+      </div>
 
-    <span class="time-display">
-      {{ formatTime(currentTime) }} / {{ formatTime(duration) }}
-    </span>
+      <span class="time-display">
+        {{ formatTime(currentTime) }}/{{ formatTime(duration) }}
+      </span>
 
-    <button class="save-btn" @click="emit('save')" title="Save audio">
-      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-      </svg>
-    </button>
+      <button class="save-btn" @click="emit('save')" title="Save audio">
+        [SAVE]
+      </button>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .audio-player {
+  padding: 0.75rem;
+  background: var(--crt-surface);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
+}
+
+.player-row {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  padding: 0.75rem 1rem;
-  background: var(--color-surface);
-  border-radius: 0.5rem;
-  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .play-btn {
@@ -133,31 +142,50 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--color-accent);
-  color: #111827;
-  border: none;
-  border-radius: 50%;
+  background: transparent;
+  color: var(--crt-bright);
+  border: 1px solid var(--crt-bright);
+  border-radius: 0;
   cursor: pointer;
+  font-family: 'VT323', monospace;
+  font-size: 18px;
   flex-shrink: 0;
-  transition: opacity 0.15s;
+  transition: background 0.15s;
+  text-shadow: 0 0 6px rgba(51, 255, 0, 0.4);
 }
 .play-btn:hover {
-  opacity: 0.85;
+  background: rgba(51, 255, 0, 0.08);
+}
+
+.progress-section {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+}
+
+.progress-bar {
+  font-size: 14px;
+  color: var(--crt-text);
+  letter-spacing: 0;
+  line-height: 1;
+  text-shadow: none;
+  pointer-events: none;
 }
 
 .seek-bar {
-  flex: 1;
-  min-height: 44px;
-  accent-color: var(--color-accent);
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
   cursor: pointer;
+  min-height: 44px;
 }
 
 .time-display {
-  font-size: 0.8rem;
-  color: #9ca3af;
+  font-size: 16px;
+  color: var(--crt-dim);
   white-space: nowrap;
-  min-width: 5rem;
-  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 .save-btn {
@@ -167,15 +195,18 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   background: transparent;
-  color: var(--color-text);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 0.375rem;
+  color: var(--crt-dim);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
   cursor: pointer;
+  font-family: 'VT323', monospace;
+  font-size: 16px;
   flex-shrink: 0;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, color 0.15s;
 }
 .save-btn:hover {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
+  border-color: var(--crt-bright);
+  color: var(--crt-bright);
+  text-shadow: 0 0 6px rgba(51, 255, 0, 0.4);
 }
 </style>
