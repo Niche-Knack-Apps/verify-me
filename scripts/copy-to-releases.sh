@@ -61,6 +61,8 @@ echo ""
 echo "[Phase 2] Building Android (Capacitor)..."
 
 if command -v npx &> /dev/null && [[ -d "android" ]]; then
+    echo "  Building web assets for Capacitor..."
+    npx vite build
     echo "  Syncing Capacitor..."
     npx cap sync android
 
