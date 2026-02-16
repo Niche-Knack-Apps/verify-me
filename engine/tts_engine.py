@@ -53,7 +53,7 @@ class TTSEngine:
         if self._current_model_id != model_id:
             self.load_model(model_id)
 
-    def generate(self, text, model_id, voice="default", speed=1.0, output_path=None):
+    def generate(self, text, model_id, voice="default", speed=1.0, output_path=None, voice_prompt=None):
         """Generate speech audio from text."""
         self._ensure_model(model_id)
 
@@ -62,7 +62,7 @@ class TTSEngine:
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
-        self._current_model.generate(text, voice, speed, output_path)
+        self._current_model.generate(text, voice, speed, output_path, voice_prompt=voice_prompt)
         return output_path
 
     def get_voices(self, model_id):

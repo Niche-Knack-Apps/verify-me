@@ -16,6 +16,7 @@ pub async fn generate_speech(
     model_id: String,
     voice: String,
     speed: Option<f32>,
+    voice_prompt: Option<String>,
 ) -> Result<String, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
@@ -29,12 +30,16 @@ pub async fn generate_speech(
         return Err("Engine is not running. Start the engine first.".into());
     }
 
-    let params = serde_json::json!({
+    let mut params = serde_json::json!({
         "text": text,
         "model_id": model_id,
         "voice": voice,
         "speed": speed.unwrap_or(1.0),
     });
+
+    if let Some(ref prompt) = voice_prompt {
+        params["voice_prompt"] = serde_json::json!(prompt);
+    }
 
     let result = manager.send_request("tts.generate", Some(params))?;
 

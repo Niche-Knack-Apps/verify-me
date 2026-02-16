@@ -35,8 +35,13 @@ class Qwen3TTSModel:
         self._processor = None
         self._loaded = False
 
-    def generate(self, text, voice="default", speed=1.0, output_path="output.wav"):
-        """Generate speech audio. Placeholder: writes a silent WAV."""
+    def generate(self, text, voice="default", speed=1.0, output_path="output.wav", voice_prompt=None):
+        """Generate speech audio. Placeholder: writes a silent WAV.
+
+        Args:
+            voice_prompt: Optional text describing the desired voice style,
+                          e.g. "warm female narrator" or "deep male with British accent".
+        """
         if not self._loaded:
             raise RuntimeError("Model not loaded")
 

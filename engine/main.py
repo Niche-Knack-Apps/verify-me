@@ -88,6 +88,7 @@ def handle_tts_generate(req_id, params):
             voice=params.get("voice", "default"),
             speed=params.get("speed", 1.0),
             output_path=params["output_path"],
+            voice_prompt=params.get("voice_prompt"),
         )
         return success_response(req_id, {"audio_path": audio_path})
     except Exception as e:
