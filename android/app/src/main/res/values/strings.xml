@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Verify Me</string>
+    <string name="title_activity_main">Verify Me</string>
+    <string name="package_name">com.nicheknack.verifyme</string>
+    <string name="custom_url_scheme">com.nicheknack.verifyme</string>
+</resources>
