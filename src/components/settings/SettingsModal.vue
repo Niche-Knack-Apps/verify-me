@@ -1,130 +1,125 @@
 <script setup lang="ts">
+import { onMounted } from 'vue';
 import { useSettingsStore } from '@/stores/settings';
+import { useModelsStore } from '@/stores/models';
+import Button from '@/components/ui/Button.vue';
+import LoggingPanel from '@/components/settings/LoggingPanel.vue';
+import AboutPanel from '@/components/settings/AboutPanel.vue';
 
-defineEmits<{
+const APP_VERSION = '0.1.0';
+
+const emit = defineEmits<{
   close: [];
 }>();
 
 const settings = useSettingsStore();
+const modelsStore = useModelsStore();
+
+onMounted(() => {
+  modelsStore.loadModels();
+});
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="$emit('close')">
-    <div class="modal-panel">
-      <div class="modal-header">
-        <h2 class="modal-title">Settings</h2>
-        <button class="close-btn" @click="$emit('close')" title="Close">
+  <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" @click.self="emit('close')">
+    <div class="bg-gray-900 rounded-lg shadow-xl w-full max-w-md max-h-[90vh] flex flex-col">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+        <h2 class="text-lg font-medium">Settings</h2>
+        <button
+          type="button"
+          class="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-gray-200 transition-colors"
+          @click="emit('close')"
+        >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
           </svg>
         </button>
       </div>
 
-      <div class="modal-body">
-        <div class="setting-group">
-          <label class="setting-label">Output Directory</label>
-          <input
-            type="text"
-            class="setting-input"
-            v-model="settings.outputDirectory"
-            placeholder="Default output directory"
-            readonly
-          />
+      <div class="px-6 py-4 space-y-6 overflow-y-auto flex-1">
+        <!-- Models -->
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Models</h3>
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">Models Directory</label>
+              <div class="flex-1 h-8 px-2 text-sm bg-gray-800 border border-gray-700 rounded text-gray-300 flex items-center overflow-hidden">
+                <span class="truncate text-gray-500 italic">
+                  {{ settings.outputDirectory || 'Using default location' }}
+                </span>
+              </div>
+            </div>
+
+            <div>
+              <label class="block text-xs text-gray-400 mb-2">Available Models</label>
+              <div v-if="modelsStore.models.length === 0" class="text-xs text-gray-500 italic">
+                No models found
+              </div>
+              <div v-else class="space-y-1 max-h-32 overflow-y-auto">
+                <div
+                  v-for="model in modelsStore.models"
+                  :key="model.id"
+                  class="flex items-center justify-between text-xs py-1.5 px-2 bg-gray-800 rounded"
+                >
+                  <span class="flex items-center gap-2">
+                    <span v-if="model.status === 'loaded'" class="text-green-400">●</span>
+                    <span v-else-if="model.status === 'available'" class="text-yellow-400">●</span>
+                    <span v-else class="text-gray-600">○</span>
+                    <span :class="model.status !== 'downloadable' ? 'text-gray-200' : 'text-gray-500'">
+                      {{ model.name }} ({{ model.size }})
+                    </span>
+                  </span>
+                  <span v-if="model.status === 'loaded'" class="text-green-400 text-xs">Loaded</span>
+                  <span v-else-if="model.status === 'available'" class="text-yellow-400 text-xs">Ready</span>
+                  <span v-else class="text-gray-500 text-xs">Download</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
-        <div class="setting-group">
-          <label class="setting-label">Device</label>
-          <p class="setting-value">{{ settings.deviceType }}</p>
+        <!-- Engine -->
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Engine</h3>
+          <div class="space-y-2">
+            <div class="flex items-center justify-between text-sm">
+              <span class="text-gray-400">Device</span>
+              <span class="text-gray-200">{{ settings.deviceType }}</span>
+            </div>
+            <div class="flex items-center justify-between text-sm">
+              <span class="text-gray-400">Status</span>
+              <span :class="settings.engineRunning ? 'text-green-400' : 'text-gray-500'">
+                {{ settings.engineRunning ? 'Running' : 'Stopped' }}
+              </span>
+            </div>
+          </div>
         </div>
+
+        <!-- Logging -->
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">Logging</h3>
+          <LoggingPanel />
+        </div>
+
+        <!-- About -->
+        <div>
+          <h3 class="text-sm font-medium text-gray-300 mb-3">About</h3>
+          <AboutPanel
+            app-name="Verify Me"
+            :app-version="APP_VERSION"
+          />
+        </div>
+      </div>
+
+      <div class="flex justify-end px-4 py-3 border-t border-gray-800">
+        <Button
+          variant="primary"
+          size="sm"
+          @click="emit('close')"
+        >
+          Done
+        </Button>
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 50;
-  padding: 1rem;
-}
-
-.modal-panel {
-  background: var(--color-bg);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 0.75rem;
-  width: 100%;
-  max-width: 28rem;
-  max-height: 80vh;
-  overflow-y: auto;
-}
-
-.modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 1rem 1.25rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.modal-title {
-  font-size: 1.1rem;
-  font-weight: 600;
-  margin: 0;
-}
-
-.close-btn {
-  min-width: 44px;
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  color: var(--color-text);
-  border: none;
-  border-radius: 0.375rem;
-  cursor: pointer;
-}
-.close-btn:hover {
-  color: var(--color-accent);
-}
-
-.modal-body {
-  padding: 1.25rem;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.setting-group {
-  display: flex;
-  flex-direction: column;
-  gap: 0.375rem;
-}
-
-.setting-label {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: #9ca3af;
-}
-
-.setting-input {
-  padding: 0.625rem 0.75rem;
-  min-height: 44px;
-  background: var(--color-surface);
-  color: var(--color-text);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 0.375rem;
-  font-size: 0.875rem;
-}
-
-.setting-value {
-  margin: 0;
-  font-size: 0.875rem;
-  color: var(--color-text);
-}
-</style>
