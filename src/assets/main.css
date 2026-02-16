@@ -2,21 +2,38 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── CRT Terminal Design Tokens ─────────────────────────────── */
 :root {
-  --color-bg: #111827;
-  --color-surface: #1f2937;
-  --color-accent: #22d3ee;
-  --color-text: #e5e7eb;
+  --crt-bg: #0a0a0a;
+  --crt-surface: #0f1a0f;
+  --crt-text: #20c20e;
+  --crt-bright: #33ff00;
+  --crt-dim: #0a8a0a;
+  --crt-border: #1a3a1a;
+  --crt-error: #ff3333;
+  --crt-warn: #cccc00;
+  --crt-glow: 0 0 4px rgba(32, 194, 14, 0.6);
+
+  /* Legacy aliases — components use these until migrated */
+  --color-bg: var(--crt-bg);
+  --color-surface: var(--crt-surface);
+  --color-accent: var(--crt-bright);
+  --color-text: var(--crt-text);
 }
 
+/* ── Base ────────────────────────────────────────────────────── */
 body {
   margin: 0;
-  background: var(--color-bg);
-  color: var(--color-text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--crt-bg);
+  color: var(--crt-text);
+  font-family: 'VT323', monospace;
+  font-size: 18px;
+  line-height: 1.4;
   overflow: hidden;
   -webkit-user-select: none;
   user-select: none;
+  text-shadow: var(--crt-glow);
+  animation: crt-flicker 4s infinite;
 }
 
 #app {
@@ -24,11 +41,157 @@ body {
   height: 100vh;
   display: flex;
   flex-direction: column;
+  position: relative;
+}
+
+/* ── Scanline Overlay ────────────────────────────────────────── */
+#app::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 0, 0, 0.15) 0px,
+    rgba(0, 0, 0, 0.15) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+/* ── Vignette ────────────────────────────────────────────────── */
+#app::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9998;
+  box-shadow: inset 0 0 120px 40px rgba(0, 0, 0, 0.7);
+}
+
+/* ── CRT Flicker ─────────────────────────────────────────────── */
+@keyframes crt-flicker {
+  0%, 100% { opacity: 1; }
+  92% { opacity: 1; }
+  93% { opacity: 0.96; }
+  94% { opacity: 1; }
+}
+
+/* ── Blinking Cursor ─────────────────────────────────────────── */
+@keyframes blink-cursor {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ── Accessibility ───────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  body {
+    animation: none;
+  }
+  #app::after {
+    background: none;
+  }
+}
+
+/* ── Scrollbar ───────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--crt-bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--crt-dim);
+  border: 1px solid var(--crt-border);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--crt-text);
+}
+
+/* ── Form Elements ───────────────────────────────────────────── */
+textarea,
+input[type="text"],
+input[type="range"],
+select {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 textarea,
 input[type="text"],
 select {
-  -webkit-user-select: text;
-  user-select: text;
+  font-family: 'VT323', monospace;
+  font-size: 18px;
+  background: var(--crt-bg);
+  color: var(--crt-text);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
+  padding: 0.5rem 0.75rem;
+  text-shadow: var(--crt-glow);
+  caret-color: var(--crt-bright);
+}
+
+textarea:focus,
+input[type="text"]:focus,
+select:focus {
+  outline: none;
+  border-color: var(--crt-bright);
+  box-shadow: 0 0 8px rgba(51, 255, 0, 0.2);
+}
+
+textarea::placeholder,
+input[type="text"]::placeholder {
+  color: var(--crt-dim);
+  text-shadow: none;
+}
+
+/* ── Range Slider ────────────────────────────────────────────── */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-track {
+  height: 2px;
+  background: var(--crt-dim);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  background: var(--crt-bright);
+  border: 1px solid var(--crt-text);
+  border-radius: 0;
+  margin-top: -6px;
+  box-shadow: 0 0 6px rgba(51, 255, 0, 0.4);
+}
+
+input[type="range"]::-moz-range-track {
+  height: 2px;
+  background: var(--crt-dim);
+  border: none;
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: var(--crt-bright);
+  border: 1px solid var(--crt-text);
+  border-radius: 0;
+  box-shadow: 0 0 6px rgba(51, 255, 0, 0.4);
+}
+
+/* ── Select Arrow ────────────────────────────────────────────── */
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2 4l4 4 4-4' fill='none' stroke='%2320c20e' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.5rem center;
+  background-size: 12px;
+  padding-right: 2rem;
 }
