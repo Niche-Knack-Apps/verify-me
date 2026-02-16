@@ -13,28 +13,28 @@ const config = {
     lightning: {
       label: 'Bitcoin Lightning',
       description: 'Instant, low-fee payments',
-      icon: '\u26a1',
+      icon: 'ZAP',
       address: 'itsmikenichols@getalby.com',
       enabled: true,
     },
     bitcoin: {
       label: 'Bitcoin On-chain',
       description: 'For larger contributions',
-      icon: '\u20bf',
+      icon: 'BTC',
       address: '',
       enabled: false,
     },
     kofi: {
       label: 'Ko-fi',
       description: 'Buy us a coffee',
-      icon: '\u2615',
+      icon: 'KFI',
       url: 'https://ko-fi.com/nicheknack',
       enabled: true,
     },
     paypal: {
       label: 'PayPal',
       description: 'Traditional payment',
-      icon: '\ud83d\udcb3',
+      icon: 'PAY',
       url: 'https://paypal.me/itsmikenichols',
       enabled: true,
     },
@@ -86,8 +86,8 @@ function openExternal(url: string) {
     <!-- Header -->
     <div class="about-header">
       <img src="@/assets/niche-knack-logo.png" alt="niche-knack apps" class="about-logo" />
-      <h3 class="app-name">{{ appName }}</h3>
-      <span class="app-version">Version {{ appVersion }}</span>
+      <div class="about-title">&gt; {{ appName.toUpperCase() }}</div>
+      <div class="about-version">v{{ appVersion }}</div>
       <div class="about-org">
         <p>Part of <strong>niche-knack apps</strong></p>
         <a :href="config.brand.website" target="_blank" rel="noopener">nicheknack.app</a>
@@ -96,7 +96,7 @@ function openExternal(url: string) {
 
     <!-- Value for Value -->
     <div class="v4v-section">
-      <h4>Support Development</h4>
+      <h4 class="v4v-heading">// SUPPORT DEVELOPMENT</h4>
       <p class="v4v-description">
         This app is free, built on the
         <a href="https://value4value.info/" target="_blank" rel="noopener">Value for Value</a> model.
@@ -111,7 +111,7 @@ function openExternal(url: string) {
           class="donation-option"
         >
           <div class="donation-info">
-            <span class="donation-icon">{{ option.icon }}</span>
+            <span class="donation-icon">[{{ option.icon }}]</span>
             <div class="donation-details">
               <strong>{{ option.label }}</strong>
               <small>{{ option.address || option.description }}</small>
@@ -120,18 +120,18 @@ function openExternal(url: string) {
           <div class="donation-action">
             <button
               v-if="option.address"
-              class="btn-copy"
-              :class="{ copied: copiedKey === option.key }"
+              class="action-btn"
+              :class="{ 'action-btn--copied': copiedKey === option.key }"
               @click="copyToClipboard(option.address!, option.key)"
             >
-              {{ copiedKey === option.key ? 'Copied!' : 'Copy' }}
+              {{ copiedKey === option.key ? '[OK!]' : '[CPY]' }}
             </button>
             <button
               v-else-if="option.url"
-              class="btn-donate"
+              class="action-btn"
               @click="openExternal(option.url!)"
             >
-              Donate
+              [GO]
             </button>
           </div>
         </div>
@@ -140,11 +140,11 @@ function openExternal(url: string) {
       <!-- Other ways -->
       <div class="other-ways">
         <strong>Other ways to help:</strong>
-        <ul>
-          <li>Share this app with others</li>
-          <li>Report bugs (<a :href="`mailto:${config.brand.email}`">{{ config.brand.email }}</a>)</li>
-          <li>Suggest features</li>
-        </ul>
+        <div class="help-list">
+          <div>* Share this app with others</div>
+          <div>* Report bugs (<a :href="`mailto:${config.brand.email}`">{{ config.brand.email }}</a>)</div>
+          <div>* Suggest features</div>
+        </div>
       </div>
     </div>
 
@@ -157,90 +157,95 @@ function openExternal(url: string) {
 
 <style scoped>
 .about-panel {
-  padding: 8px 0;
+  padding: 0.5rem 0;
 }
 
 .about-header {
   text-align: center;
-  margin-bottom: 24px;
+  margin-bottom: 1.5rem;
 }
 
 .about-logo {
-  width: 80px;
-  height: 80px;
-  margin: 0 auto 12px;
-  border-radius: 12px;
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 0.75rem;
+  border-radius: 0;
+  border: 1px solid var(--crt-border);
 }
 
-.app-name {
-  font-size: 1.25rem;
-  font-weight: 600;
-  margin: 0 0 4px;
+.about-title {
+  font-size: 22px;
+  color: var(--crt-bright);
+  text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
+  margin-bottom: 0.25rem;
 }
 
-.app-version {
-  font-size: 0.8rem;
-  opacity: 0.7;
+.about-version {
+  font-size: 16px;
+  color: var(--crt-dim);
 }
 
 .about-org {
-  margin-top: 8px;
-  font-size: 0.85rem;
-  opacity: 0.8;
+  margin-top: 0.5rem;
+  font-size: 16px;
+  color: var(--crt-dim);
 }
 
 .about-org a {
-  color: #22d3ee;
+  color: var(--crt-bright);
 }
 
 .v4v-section {
-  padding-top: 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 1rem;
+  border-top: 1px solid var(--crt-border);
 }
 
-.v4v-section h4 {
-  font-size: 0.95rem;
-  margin-bottom: 8px;
+.v4v-heading {
+  font-size: 16px;
+  font-weight: 400;
+  color: var(--crt-dim);
+  margin-bottom: 0.5rem;
+  letter-spacing: 0.05em;
 }
 
 .v4v-description {
-  font-size: 0.85rem;
-  opacity: 0.8;
-  margin-bottom: 16px;
+  font-size: 16px;
+  color: var(--crt-dim);
+  margin-bottom: 1rem;
 }
 
 .v4v-description a {
-  color: #22d3ee;
+  color: var(--crt-bright);
 }
 
 .donation-options {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0.5rem;
 }
 
 .donation-option {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px;
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 0.75rem;
+  background: var(--crt-surface);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
 }
 
 .donation-info {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 0.75rem;
   flex: 1;
   min-width: 0;
 }
 
 .donation-icon {
-  font-size: 1.5rem;
-  width: 36px;
-  text-align: center;
+  font-size: 16px;
+  color: var(--crt-bright);
+  flex-shrink: 0;
 }
 
 .donation-details {
@@ -250,86 +255,78 @@ function openExternal(url: string) {
 
 .donation-details strong {
   display: block;
-  font-size: 0.9rem;
+  font-size: 16px;
+  font-weight: 400;
+  color: var(--crt-text);
 }
 
 .donation-details small {
   display: block;
-  font-size: 0.75rem;
-  opacity: 0.7;
+  font-size: 14px;
+  color: var(--crt-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.btn-copy,
-.btn-donate {
-  padding: 6px 12px;
-  font-size: 0.8rem;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 4px;
+.action-btn {
+  font-family: 'VT323', monospace;
+  font-size: 16px;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
   background: transparent;
-  color: inherit;
+  color: var(--crt-text);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: color 0.15s, border-color 0.15s;
 }
 
-.btn-copy:hover,
-.btn-donate:hover {
-  background: #22d3ee;
-  border-color: #22d3ee;
-  color: #111827;
+.action-btn:hover {
+  color: var(--crt-bright);
+  border-color: var(--crt-bright);
+  text-shadow: 0 0 6px rgba(51, 255, 0, 0.4);
 }
 
-.btn-copy.copied {
-  background: #4caf50;
-  border-color: #4caf50;
-  color: white;
+.action-btn--copied {
+  color: var(--crt-bright);
+  border-color: var(--crt-bright);
 }
 
 .other-ways {
-  margin-top: 16px;
-  padding: 12px;
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 8px;
-  font-size: 0.85rem;
+  margin-top: 1rem;
+  padding: 0.75rem;
+  background: var(--crt-surface);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
+  font-size: 16px;
 }
 
 .other-ways strong {
   display: block;
-  margin-bottom: 8px;
+  color: var(--crt-text);
+  margin-bottom: 0.5rem;
 }
 
-.other-ways ul {
-  list-style: none;
-  padding: 0;
-  margin: 0;
+.help-list {
+  color: var(--crt-dim);
 }
 
-.other-ways li {
-  padding: 4px 0 4px 16px;
-  position: relative;
+.help-list div {
+  padding: 0.125rem 0;
 }
 
-.other-ways li::before {
-  content: '\2022';
-  position: absolute;
-  left: 0;
-  opacity: 0.5;
-}
-
-.other-ways a {
-  color: #22d3ee;
+.help-list a {
+  color: var(--crt-bright);
 }
 
 .about-footer {
-  margin-top: 16px;
+  margin-top: 1rem;
   text-align: center;
-  font-size: 0.8rem;
-  opacity: 0.7;
+  font-size: 14px;
+  color: var(--crt-dim);
 }
 
 .about-footer a {
-  color: #22d3ee;
+  color: var(--crt-bright);
 }
 </style>

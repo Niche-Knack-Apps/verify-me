@@ -31,84 +31,73 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" @click.self="emit('close')">
-    <div class="bg-gray-900 rounded-lg shadow-xl w-full max-w-md max-h-[90vh] flex flex-col">
-      <div class="flex items-center justify-between px-4 py-3 border-b border-gray-800">
-        <h2 class="text-lg font-medium">Settings</h2>
-        <button
-          type="button"
-          class="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-gray-200 transition-colors"
-          @click="emit('close')"
-        >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
+  <div class="modal-overlay" @click.self="emit('close')">
+    <div class="modal-container">
+      <!-- Header -->
+      <div class="modal-header">
+        <h2 class="modal-title">&gt; SYSTEM CONFIGURATION_</h2>
+        <button class="close-btn" @click="emit('close')">[X]</button>
       </div>
 
-      <div class="px-6 py-4 space-y-6 overflow-y-auto flex-1">
+      <!-- Content -->
+      <div class="modal-content">
         <!-- Models -->
-        <div>
-          <h3 class="text-sm font-medium text-gray-300 mb-3">Models</h3>
-          <div class="space-y-3">
+        <div class="config-section">
+          <h3 class="section-title">// MODELS</h3>
+          <div class="config-items">
             <div>
-              <label class="block text-xs text-gray-400 mb-1">Models Directory</label>
-              <div class="flex gap-2">
-                <div class="flex-1 h-8 px-2 text-sm bg-gray-800 border border-gray-700 rounded text-gray-300 flex items-center overflow-hidden">
-                  <span class="truncate">
-                    {{ settings.modelsDirectory || 'Loading...' }}
-                  </span>
+              <label class="config-label">Models Directory</label>
+              <div class="dir-row">
+                <div class="dir-display">
+                  {{ settings.modelsDirectory || 'Loading...' }}
                 </div>
                 <Button variant="secondary" size="sm" @click="openModelsDirectory">
-                  Open
+                  [OPEN]
                 </Button>
               </div>
             </div>
 
             <div>
-              <label class="block text-xs text-gray-400 mb-2">Available Models</label>
-              <div v-if="modelsStore.models.length === 0" class="text-xs text-gray-500 italic">
+              <label class="config-label">Available Models</label>
+              <div v-if="modelsStore.models.length === 0" class="empty-text">
                 No models found
               </div>
-              <div v-else class="space-y-1 max-h-40 overflow-y-auto">
+              <div v-else class="model-list">
                 <div
                   v-for="model in modelsStore.models"
                   :key="model.id"
-                  class="flex items-center justify-between text-xs py-1.5 px-2 bg-gray-800 rounded"
+                  class="model-entry"
                 >
-                  <span class="flex items-center gap-2">
-                    <span v-if="model.status === 'available'" class="text-green-400">●</span>
-                    <span v-else class="text-gray-600">○</span>
-                    <span :class="model.status === 'available' ? 'text-gray-200' : 'text-gray-500'">
+                  <span class="model-entry-info">
+                    <span v-if="model.status === 'available'" class="status-ready">[*]</span>
+                    <span v-else class="status-missing">[ ]</span>
+                    <span :class="model.status === 'available' ? 'text-ready' : 'text-missing'">
                       {{ model.name }} ({{ model.size }})
                     </span>
                   </span>
-                  <div class="flex items-center gap-2">
+                  <div class="model-entry-actions">
                     <!-- Download progress -->
-                    <div v-if="modelsStore.downloading === model.id" class="flex items-center gap-2">
-                      <div class="w-20 h-1.5 bg-gray-700 rounded-full overflow-hidden">
-                        <div
-                          class="h-full bg-cyan-400 transition-all duration-300"
-                          :style="{ width: `${modelsStore.downloadProgress[model.id] ?? 0}%` }"
-                        />
-                      </div>
-                      <span class="text-gray-400 text-xs whitespace-nowrap">{{ Math.round(modelsStore.downloadProgress[model.id] ?? 0) }}%</span>
+                    <div v-if="modelsStore.downloading === model.id" class="download-status">
+                      <span class="download-bar">
+                        {{ '\u2588'.repeat(Math.round((modelsStore.downloadProgress[model.id] ?? 0) / 5)) }}{{ '\u2591'.repeat(20 - Math.round((modelsStore.downloadProgress[model.id] ?? 0) / 5)) }}
+                      </span>
+                      <span class="download-pct">{{ Math.round(modelsStore.downloadProgress[model.id] ?? 0) }}%</span>
                     </div>
                     <!-- Download button -->
                     <button
                       v-else-if="model.status === 'downloadable'"
-                      class="text-cyan-400 hover:text-cyan-300 text-xs"
+                      class="action-link"
                       @click="modelsStore.downloadModel(model.id)"
                     >
-                      Download
+                      [GET]
                     </button>
-                    <!-- Delete button (downloaded models only) -->
+                    <!-- Delete button -->
                     <button
                       v-else-if="model.status === 'available' && model.downloadUrl"
-                      class="text-gray-500 hover:text-red-400 text-xs"
+                      class="action-link action-link--danger"
                       @click="modelsStore.deleteModel(model.id)"
                     >
-                      Delete
+                      [DEL]
                     </button>
                   </div>
                 </div>
@@ -118,31 +107,31 @@ onMounted(() => {
         </div>
 
         <!-- Engine -->
-        <div>
-          <h3 class="text-sm font-medium text-gray-300 mb-3">Engine</h3>
-          <div class="space-y-2">
-            <div class="flex items-center justify-between text-sm">
-              <span class="text-gray-400">Device</span>
-              <span class="text-gray-200">{{ settings.deviceType }}</span>
+        <div class="config-section">
+          <h3 class="section-title">// ENGINE</h3>
+          <div class="config-items">
+            <div class="config-row">
+              <span class="config-key">Device</span>
+              <span class="config-value">{{ settings.deviceType.toUpperCase() }}</span>
             </div>
-            <div class="flex items-center justify-between text-sm">
-              <span class="text-gray-400">Status</span>
-              <span :class="settings.engineRunning ? 'text-green-400' : 'text-gray-500'">
-                {{ settings.engineRunning ? 'Running' : 'Stopped' }}
+            <div class="config-row">
+              <span class="config-key">Status</span>
+              <span :class="settings.engineRunning ? 'config-value--ok' : 'config-value--off'">
+                {{ settings.engineRunning ? 'RUNNING' : 'STOPPED' }}
               </span>
             </div>
           </div>
         </div>
 
         <!-- Logging -->
-        <div>
-          <h3 class="text-sm font-medium text-gray-300 mb-3">Logging</h3>
+        <div class="config-section">
+          <h3 class="section-title">// LOGGING</h3>
           <LoggingPanel />
         </div>
 
         <!-- About -->
-        <div>
-          <h3 class="text-sm font-medium text-gray-300 mb-3">About</h3>
+        <div class="config-section">
+          <h3 class="section-title">// ABOUT</h3>
           <AboutPanel
             app-name="Verify Me"
             :app-version="APP_VERSION"
@@ -150,15 +139,244 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="flex justify-end px-4 py-3 border-t border-gray-800">
-        <Button
-          variant="primary"
-          size="sm"
-          @click="emit('close')"
-        >
-          Done
+      <!-- Footer -->
+      <div class="modal-footer">
+        <Button variant="primary" size="sm" @click="emit('close')">
+          [DONE]
         </Button>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 1rem;
+}
+
+.modal-container {
+  background: var(--crt-bg);
+  border: 1px solid var(--crt-bright);
+  border-radius: 0;
+  box-shadow: 0 0 20px rgba(51, 255, 0, 0.15);
+  width: 100%;
+  max-width: 28rem;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--crt-border);
+}
+
+.modal-title {
+  font-size: 20px;
+  font-weight: 400;
+  color: var(--crt-bright);
+  text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
+}
+
+.close-btn {
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--crt-dim);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
+  cursor: pointer;
+  font-family: 'VT323', monospace;
+  font-size: 18px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.close-btn:hover {
+  color: var(--crt-error);
+  border-color: var(--crt-error);
+}
+
+.modal-content {
+  padding: 1rem 1.5rem;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.config-section {
+  margin-bottom: 1.5rem;
+}
+.config-section:last-child {
+  margin-bottom: 0;
+}
+
+.section-title {
+  font-size: 16px;
+  font-weight: 400;
+  color: var(--crt-dim);
+  margin-bottom: 0.75rem;
+  letter-spacing: 0.05em;
+}
+
+.config-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.config-label {
+  display: block;
+  font-size: 14px;
+  color: var(--crt-dim);
+  margin-bottom: 0.25rem;
+}
+
+.dir-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.dir-display {
+  flex: 1;
+  padding: 0.25rem 0.5rem;
+  font-size: 16px;
+  background: var(--crt-surface);
+  border: 1px solid var(--crt-border);
+  color: var(--crt-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+}
+
+.empty-text {
+  font-size: 14px;
+  color: var(--crt-dim);
+  font-style: italic;
+}
+
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 10rem;
+  overflow-y: auto;
+}
+
+.model-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.375rem 0.5rem;
+  background: var(--crt-surface);
+  border: 1px solid var(--crt-border);
+  font-size: 16px;
+}
+
+.model-entry-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.status-ready {
+  color: var(--crt-bright);
+}
+.status-missing {
+  color: var(--crt-dim);
+}
+
+.text-ready {
+  color: var(--crt-text);
+}
+.text-missing {
+  color: var(--crt-dim);
+}
+
+.model-entry-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.download-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.download-bar {
+  font-size: 12px;
+  color: var(--crt-text);
+  text-shadow: none;
+  letter-spacing: 0;
+}
+
+.download-pct {
+  font-size: 14px;
+  color: var(--crt-dim);
+}
+
+.action-link {
+  font-family: 'VT323', monospace;
+  font-size: 16px;
+  background: transparent;
+  color: var(--crt-bright);
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  transition: text-shadow 0.15s;
+}
+.action-link:hover {
+  text-shadow: 0 0 6px rgba(51, 255, 0, 0.5);
+}
+.action-link--danger {
+  color: var(--crt-dim);
+}
+.action-link--danger:hover {
+  color: var(--crt-error);
+  text-shadow: 0 0 6px rgba(255, 51, 51, 0.4);
+}
+
+.config-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 16px;
+}
+
+.config-key {
+  color: var(--crt-dim);
+}
+
+.config-value {
+  color: var(--crt-text);
+}
+
+.config-value--ok {
+  color: var(--crt-bright);
+  text-shadow: 0 0 6px rgba(51, 255, 0, 0.4);
+}
+.config-value--off {
+  color: var(--crt-dim);
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--crt-border);
+}
+</style>

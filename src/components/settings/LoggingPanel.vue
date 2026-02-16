@@ -46,7 +46,6 @@ async function handleDownload() {
     if (!result.success) {
       console.error('Failed to download logs:', result.error);
     }
-    // Auto-clear success message after 5 seconds
     if (result.success) {
       setTimeout(() => {
         if (downloadResult.value?.success) {
@@ -95,16 +94,16 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function getLevelTag(level: string): string {
+  return `[${level.toUpperCase()}]`;
+}
+
 function getLevelClass(level: string): string {
   switch (level) {
-    case 'error':
-      return 'text-red-400';
-    case 'warn':
-      return 'text-yellow-400';
-    case 'debug':
-      return 'text-gray-500';
-    default:
-      return 'text-gray-300';
+    case 'error': return 'log-error';
+    case 'warn': return 'log-warn';
+    case 'debug': return 'log-debug';
+    default: return 'log-info';
   }
 }
 
@@ -122,107 +121,62 @@ onUnmounted(() => {
 <template>
   <div class="logging-panel">
     <!-- Stats -->
-    <div v-if="stats" class="stats-grid">
-      <div class="stat-item">
-        <span class="stat-value">{{ stats.totalCount }}</span>
-        <span class="stat-label">Total Logs</span>
-      </div>
-      <div class="stat-item">
-        <span class="stat-value">{{ stats.sessionCount }}</span>
-        <span class="stat-label">Sessions</span>
-      </div>
-      <div class="stat-item">
-        <span class="stat-value">{{ formatSize(stats.estimatedSize) }}</span>
-        <span class="stat-label">Size</span>
-      </div>
+    <div v-if="stats" class="stats-row">
+      <span class="stat">ENTRIES: <span class="stat-val">{{ stats.totalCount }}</span></span>
+      <span class="stat">SESSIONS: <span class="stat-val">{{ stats.sessionCount }}</span></span>
+      <span class="stat">SIZE: <span class="stat-val">{{ formatSize(stats.estimatedSize) }}</span></span>
     </div>
 
     <!-- Level breakdown -->
     <div v-if="stats" class="level-breakdown">
-      <span class="level-badge level-info">
-        {{ stats.byLevel.info }} info
-      </span>
-      <span class="level-badge level-warn">
-        {{ stats.byLevel.warn }} warn
-      </span>
-      <span class="level-badge level-error">
-        {{ stats.byLevel.error }} error
-      </span>
-      <span class="level-badge level-debug">
-        {{ stats.byLevel.debug }} debug
-      </span>
+      <span class="level-tag log-info">INFO:{{ stats.byLevel.info }}</span>
+      <span class="level-tag log-warn">WARN:{{ stats.byLevel.warn }}</span>
+      <span class="level-tag log-error">ERR:{{ stats.byLevel.error }}</span>
+      <span class="level-tag log-debug">DBG:{{ stats.byLevel.debug }}</span>
     </div>
 
     <!-- Actions -->
     <div class="actions">
-      <Button
-        variant="secondary"
-        size="sm"
-        :disabled="downloading"
-        @click="handleDownload"
-      >
-        {{ downloading ? 'Downloading...' : 'Download Logs' }}
+      <Button variant="secondary" size="sm" :disabled="downloading" @click="handleDownload">
+        {{ downloading ? '[...]' : '[EXPORT]' }}
+      </Button>
+      <Button variant="ghost" size="sm" :disabled="clearing" @click="handleClear">
+        {{ clearing ? '[...]' : '[CLEAR]' }}
       </Button>
       <Button
         variant="ghost"
         size="sm"
-        :disabled="clearing"
-        @click="handleClear"
-      >
-        {{ clearing ? 'Clearing...' : 'Clear Logs' }}
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        :class="{ 'text-cyan-400': autoRefresh }"
         @click="toggleAutoRefresh"
       >
-        {{ autoRefresh ? 'Auto-refresh ON' : 'Auto-refresh' }}
+        {{ autoRefresh ? '[AUTO:ON]' : '[AUTO:OFF]' }}
       </Button>
     </div>
 
     <!-- Download result feedback -->
-    <div v-if="downloadResult" class="download-feedback" :class="downloadResult.success ? 'download-success' : 'download-error'">
-      <span v-if="downloadResult.success">
-        Logs saved to: {{ downloadResult.filename }}
-      </span>
-      <span v-else>
-        Failed to download: {{ downloadResult.error }}
-      </span>
+    <div v-if="downloadResult" class="feedback" :class="downloadResult.success ? 'feedback--ok' : 'feedback--err'">
+      <span v-if="downloadResult.success">Saved: {{ downloadResult.filename }}</span>
+      <span v-else>ERROR: {{ downloadResult.error }}</span>
     </div>
 
     <!-- Filter -->
     <div class="filter-row">
-      <label class="filter-label">Filter:</label>
+      <span class="filter-label">FILTER:</span>
       <select v-model="filterLevel" class="filter-select">
-        <option value="all">All Levels</option>
-        <option value="info">Info</option>
-        <option value="warn">Warn</option>
-        <option value="error">Error</option>
-        <option value="debug">Debug</option>
+        <option value="all">ALL</option>
+        <option value="info">INFO</option>
+        <option value="warn">WARN</option>
+        <option value="error">ERROR</option>
+        <option value="debug">DEBUG</option>
       </select>
       <button class="refresh-btn" @click="loadData" :disabled="loading">
-        <svg
-          class="w-4 h-4"
-          :class="{ 'animate-spin': loading }"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            stroke-width="2"
-            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-          />
-        </svg>
+        {{ loading ? '[...]' : '[REF]' }}
       </button>
     </div>
 
     <!-- Recent logs -->
     <div class="logs-container">
       <div v-if="filteredLogs.length === 0" class="no-logs">
-        No logs to display
+        -- NO LOGS --
       </div>
       <div
         v-for="(log, index) in filteredLogs"
@@ -230,9 +184,7 @@ onUnmounted(() => {
         class="log-entry"
       >
         <span class="log-time">{{ formatTimestamp(log.timestamp) }}</span>
-        <span class="log-level" :class="getLevelClass(log.level)">
-          {{ log.level.toUpperCase() }}
-        </span>
+        <span class="log-level" :class="getLevelClass(log.level)">{{ getLevelTag(log.level) }}</span>
         <span class="log-message">{{ log.message }}</span>
       </div>
     </div>
@@ -241,165 +193,130 @@ onUnmounted(() => {
 
 <style scoped>
 .logging-panel {
-  padding: 8px 0;
+  padding: 0.5rem 0;
 }
 
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-  margin-bottom: 12px;
+.stats-row {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+  font-size: 14px;
+  color: var(--crt-dim);
 }
 
-.stat-item {
-  text-align: center;
-  padding: 8px;
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 6px;
-}
-
-.stat-value {
-  display: block;
-  font-size: 1.25rem;
-  font-weight: 600;
-  color: #22d3ee;
-}
-
-.stat-label {
-  font-size: 0.7rem;
-  opacity: 0.7;
-  text-transform: uppercase;
+.stat-val {
+  color: var(--crt-bright);
 }
 
 .level-breakdown {
   display: flex;
-  gap: 8px;
+  gap: 0.75rem;
   flex-wrap: wrap;
-  margin-bottom: 12px;
+  margin-bottom: 0.75rem;
+  font-size: 14px;
 }
 
-.level-badge {
-  font-size: 0.7rem;
-  padding: 2px 8px;
-  border-radius: 4px;
+.level-tag {
+  letter-spacing: 0.05em;
 }
 
-.level-info {
-  background: rgba(59, 130, 246, 0.2);
-  color: #93c5fd;
-}
-
-.level-warn {
-  background: rgba(245, 158, 11, 0.2);
-  color: #fcd34d;
-}
-
-.level-error {
-  background: rgba(239, 68, 68, 0.2);
-  color: #fca5a5;
-}
-
-.level-debug {
-  background: rgba(107, 114, 128, 0.2);
-  color: #9ca3af;
-}
+.log-info { color: var(--crt-text); }
+.log-warn { color: var(--crt-warn); }
+.log-error { color: var(--crt-error); }
+.log-debug { color: var(--crt-dim); }
 
 .actions {
   display: flex;
-  gap: 8px;
+  gap: 0.5rem;
   flex-wrap: wrap;
-  margin-bottom: 12px;
+  margin-bottom: 0.75rem;
 }
 
-.download-feedback {
-  font-size: 0.75rem;
-  padding: 6px 10px;
-  border-radius: 4px;
-  margin-bottom: 8px;
+.feedback {
+  font-size: 14px;
+  padding: 0.375rem 0.5rem;
+  margin-bottom: 0.5rem;
   word-break: break-all;
 }
 
-.download-success {
-  background: rgba(34, 197, 94, 0.15);
-  border: 1px solid rgba(34, 197, 94, 0.3);
-  color: #86efac;
+.feedback--ok {
+  background: rgba(51, 255, 0, 0.05);
+  border: 1px solid var(--crt-border);
+  color: var(--crt-text);
 }
 
-.download-error {
-  background: rgba(239, 68, 68, 0.15);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
+.feedback--err {
+  background: rgba(255, 51, 51, 0.05);
+  border: 1px solid rgba(255, 51, 51, 0.3);
+  color: var(--crt-error);
 }
 
 .filter-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
 }
 
 .filter-label {
-  font-size: 0.75rem;
-  opacity: 0.7;
+  font-size: 14px;
+  color: var(--crt-dim);
 }
 
 .filter-select {
   flex: 1;
   height: 28px;
-  padding: 0 8px;
-  font-size: 0.75rem;
-  background: #1f2937;
-  border: 1px solid #374151;
-  border-radius: 4px;
-  color: #e5e7eb;
+  padding: 0 0.5rem;
+  font-size: 16px;
+  font-family: 'VT323', monospace;
+  background: var(--crt-bg);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
+  color: var(--crt-text);
 }
 
 .refresh-btn {
-  width: 28px;
   height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  padding: 0 0.5rem;
+  font-family: 'VT323', monospace;
+  font-size: 16px;
   background: transparent;
-  border: 1px solid #374151;
-  border-radius: 4px;
-  color: #9ca3af;
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
+  color: var(--crt-dim);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: color 0.15s, border-color 0.15s;
 }
-
 .refresh-btn:hover:not(:disabled) {
-  border-color: #22d3ee;
-  color: #22d3ee;
+  border-color: var(--crt-text);
+  color: var(--crt-text);
 }
-
 .refresh-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
 .logs-container {
   max-height: 200px;
   overflow-y: auto;
-  background: rgba(0, 0, 0, 0.3);
-  border-radius: 6px;
-  padding: 8px;
-  font-family: monospace;
-  font-size: 0.7rem;
+  background: var(--crt-surface);
+  border: 1px solid var(--crt-border);
+  padding: 0.5rem;
+  font-size: 14px;
 }
 
 .no-logs {
   text-align: center;
-  padding: 16px;
-  opacity: 0.5;
-  font-style: italic;
+  padding: 1rem;
+  color: var(--crt-dim);
 }
 
 .log-entry {
   display: flex;
-  gap: 8px;
-  padding: 2px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  gap: 0.5rem;
+  padding: 0.125rem 0;
+  border-bottom: 1px solid rgba(26, 58, 26, 0.5);
 }
 
 .log-entry:last-child {
@@ -407,14 +324,13 @@ onUnmounted(() => {
 }
 
 .log-time {
-  color: #6b7280;
+  color: var(--crt-dim);
   flex-shrink: 0;
 }
 
 .log-level {
-  width: 40px;
+  width: 3.5rem;
   flex-shrink: 0;
-  font-weight: 600;
 }
 
 .log-message {
@@ -422,6 +338,6 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #d1d5db;
+  color: var(--crt-text);
 }
 </style>

@@ -22,27 +22,60 @@ function toggle() {
 
 <template>
   <label
-    class="inline-flex items-center cursor-pointer"
-    :class="{ 'opacity-50 cursor-not-allowed': disabled }"
+    class="crt-toggle"
+    :class="{ 'crt-toggle--disabled': disabled }"
   >
     <button
       type="button"
       role="switch"
       :aria-checked="modelValue"
-      :class="[
-        'relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 focus:ring-offset-gray-900',
-        modelValue ? 'bg-cyan-500' : 'bg-gray-600',
-      ]"
+      class="crt-toggle__switch"
       :disabled="disabled"
       @click="toggle"
     >
-      <span
-        :class="[
-          'pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
-          modelValue ? 'translate-x-4' : 'translate-x-0',
-        ]"
-      />
+      {{ modelValue ? '[ON ]' : '[OFF]' }}
     </button>
-    <span v-if="label" class="ml-2 text-sm text-gray-300">{{ label }}</span>
+    <span v-if="label" class="crt-toggle__label">{{ label }}</span>
   </label>
 </template>
+
+<style scoped>
+.crt-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.crt-toggle--disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.crt-toggle__switch {
+  font-family: 'VT323', monospace;
+  font-size: 18px;
+  background: transparent;
+  color: var(--crt-dim);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
+  padding: 0.125rem 0.375rem;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.crt-toggle__switch[aria-checked="true"] {
+  color: var(--crt-bright);
+  border-color: var(--crt-bright);
+  text-shadow: 0 0 6px rgba(51, 255, 0, 0.4);
+}
+
+.crt-toggle__switch:hover:not(:disabled) {
+  border-color: var(--crt-text);
+}
+
+.crt-toggle__label {
+  font-size: 16px;
+  color: var(--crt-text);
+}
+</style>
