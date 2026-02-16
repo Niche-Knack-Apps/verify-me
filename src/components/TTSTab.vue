@@ -4,14 +4,6 @@ import ModelSelector from '@/components/ModelSelector.vue';
 import AudioPlayer from '@/components/AudioPlayer.vue';
 
 const tts = useTTSStore();
-
-const voices = [
-  { id: 'default', label: 'Default' },
-  { id: 'female-1', label: 'Female 1' },
-  { id: 'male-1', label: 'Male 1' },
-  { id: 'female-2', label: 'Female 2' },
-  { id: 'male-2', label: 'Male 2' },
-];
 </script>
 
 <template>
@@ -32,7 +24,7 @@ const voices = [
       <div class="control-group">
         <label class="field-label" for="voice-select">Voice</label>
         <select id="voice-select" v-model="tts.selectedVoice" class="voice-select">
-          <option v-for="v in voices" :key="v.id" :value="v.id">{{ v.label }}</option>
+          <option v-for="v in tts.voices" :key="v.id" :value="v.id">{{ v.name }}</option>
         </select>
       </div>
 
@@ -49,6 +41,16 @@ const voices = [
           v-model.number="tts.speed"
         />
       </div>
+    </div>
+
+    <div v-if="tts.selectedModel?.supportsVoicePrompt" class="input-section">
+      <label class="field-label">Voice Prompt <span class="optional-tag">optional</span></label>
+      <input
+        type="text"
+        v-model="tts.voicePrompt"
+        class="voice-prompt-input"
+        placeholder="Describe the voice, e.g. 'warm female narrator' or 'deep male with British accent'"
+      />
     </div>
 
     <button
@@ -85,6 +87,12 @@ const voices = [
   font-weight: 500;
   color: #9ca3af;
   margin-bottom: 0.375rem;
+}
+
+.optional-tag {
+  font-weight: 400;
+  font-size: 0.75rem;
+  color: #6b7280;
 }
 
 .text-input {
@@ -129,6 +137,25 @@ const voices = [
 .voice-select:focus {
   outline: none;
   border-color: var(--color-accent);
+}
+
+.voice-prompt-input {
+  width: 100%;
+  padding: 0.625rem 0.75rem;
+  min-height: 44px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  font-family: inherit;
+}
+.voice-prompt-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+.voice-prompt-input::placeholder {
+  color: #6b7280;
 }
 
 .speed-slider {

@@ -19,7 +19,7 @@ class PocketTTSModel:
 
     @staticmethod
     def supports_clone():
-        return False
+        return True
 
     def load(self):
         self._loaded = True
@@ -27,7 +27,7 @@ class PocketTTSModel:
     def unload(self):
         self._loaded = False
 
-    def generate(self, text, voice="default", speed=1.0, output_path="output.wav"):
+    def generate(self, text, voice="default", speed=1.0, output_path="output.wav", voice_prompt=None):
         """Generate speech audio. Placeholder: writes a silent WAV."""
         if not self._loaded:
             raise RuntimeError("Model not loaded")
@@ -46,5 +46,12 @@ class PocketTTSModel:
 
     def get_voices(self):
         return [
-            {"id": "default", "name": "Default", "language": "en"},
+            {"id": "alba", "name": "Alba (Female, Neutral)", "language": "en"},
+            {"id": "cosette", "name": "Cosette (Female, Gentle)", "language": "en"},
+            {"id": "fantine", "name": "Fantine (Female, Expressive)", "language": "en"},
+            {"id": "eponine", "name": "Eponine (Female, British)", "language": "en"},
+            {"id": "azelma", "name": "Azelma (Female, Youthful)", "language": "en"},
+            {"id": "jean", "name": "Jean (Male, Warm)", "language": "en"},
+            {"id": "marius", "name": "Marius (Male, Casual)", "language": "en"},
+            {"id": "javert", "name": "Javert (Male, Authoritative)", "language": "en"},
         ]

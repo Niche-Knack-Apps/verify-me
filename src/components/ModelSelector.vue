@@ -23,7 +23,6 @@ const filteredModels = computed(() => {
 
 function statusLabel(status: TTSModel['status']): string {
   switch (status) {
-    case 'loaded': return 'Loaded';
     case 'available': return 'Available';
     case 'downloadable': return 'Download';
     default: return '';
@@ -32,7 +31,6 @@ function statusLabel(status: TTSModel['status']): string {
 
 function statusClass(status: TTSModel['status']): string {
   switch (status) {
-    case 'loaded': return 'status-loaded';
     case 'available': return 'status-available';
     case 'downloadable': return 'status-download';
     default: return '';
@@ -54,20 +52,23 @@ onMounted(() => {
         v-for="model in filteredModels"
         :key="model.id"
         class="model-item"
-        :class="{ selected: modelValue === model.id }"
-        @click="model.status !== 'downloadable' && emit('update:modelValue', model.id)"
+        :class="{ selected: modelValue === model.id, disabled: modelsStore.downloading === model.id }"
+        @click="model.status === 'available' && modelsStore.downloading !== model.id && emit('update:modelValue', model.id)"
       >
         <div class="model-info">
           <span class="model-name">{{ model.name }}</span>
           <span class="model-size">{{ model.size }}</span>
         </div>
-        <span v-if="model.status !== 'downloadable'" class="model-status" :class="statusClass(model.status)">
+        <span v-if="modelsStore.downloading === model.id" class="download-progress">
+          {{ Math.round(modelsStore.downloadProgress[model.id] ?? 0) }}%
+        </span>
+        <span v-else-if="model.status === 'available'" class="model-status" :class="statusClass(model.status)">
           {{ statusLabel(model.status) }}
         </span>
         <button
           v-else
           class="download-btn"
-          @click.stop="modelsStore.downloadModel('', model.id)"
+          @click.stop="modelsStore.downloadModel(model.id)"
           title="Download model"
         >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -145,10 +146,6 @@ onMounted(() => {
   padding: 0.125rem 0.5rem;
   border-radius: 9999px;
 }
-.status-loaded {
-  background: rgba(34, 197, 94, 0.15);
-  color: #22c55e;
-}
 .status-available {
   background: rgba(234, 179, 8, 0.15);
   color: #eab308;
@@ -173,6 +170,16 @@ onMounted(() => {
 }
 .download-btn:hover {
   background: rgba(34, 211, 238, 0.1);
+}
+
+.model-item.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.download-progress {
+  font-size: 0.75rem;
+  color: var(--color-accent);
 }
 
 .no-models {

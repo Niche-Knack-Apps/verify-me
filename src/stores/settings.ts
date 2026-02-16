@@ -7,6 +7,16 @@ export const useSettingsStore = defineStore('settings', () => {
   const engineRunning = ref(false);
   const deviceType = ref('CPU');
   const outputDirectory = ref('');
+  const modelsDirectory = ref('');
+
+  async function loadModelsDirectory() {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      modelsDirectory.value = await invoke<string>('get_models_directory');
+    } catch (e) {
+      console.error('Failed to load models directory:', e);
+    }
+  }
 
   return {
     activeTab,
@@ -14,5 +24,7 @@ export const useSettingsStore = defineStore('settings', () => {
     engineRunning,
     deviceType,
     outputDirectory,
+    modelsDirectory,
+    loadModelsDirectory,
   };
 });

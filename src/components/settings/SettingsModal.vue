@@ -15,8 +15,18 @@ const emit = defineEmits<{
 const settings = useSettingsStore();
 const modelsStore = useModelsStore();
 
+async function openModelsDirectory() {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('open_models_directory');
+  } catch (e) {
+    console.error('Failed to open models directory:', e);
+  }
+}
+
 onMounted(() => {
   modelsStore.loadModels();
+  settings.loadModelsDirectory();
 });
 </script>
 
@@ -43,10 +53,15 @@ onMounted(() => {
           <div class="space-y-3">
             <div>
               <label class="block text-xs text-gray-400 mb-1">Models Directory</label>
-              <div class="flex-1 h-8 px-2 text-sm bg-gray-800 border border-gray-700 rounded text-gray-300 flex items-center overflow-hidden">
-                <span class="truncate text-gray-500 italic">
-                  {{ settings.outputDirectory || 'Using default location' }}
-                </span>
+              <div class="flex gap-2">
+                <div class="flex-1 h-8 px-2 text-sm bg-gray-800 border border-gray-700 rounded text-gray-300 flex items-center overflow-hidden">
+                  <span class="truncate">
+                    {{ settings.modelsDirectory || 'Loading...' }}
+                  </span>
+                </div>
+                <Button variant="secondary" size="sm" @click="openModelsDirectory">
+                  Open
+                </Button>
               </div>
             </div>
 
@@ -55,23 +70,47 @@ onMounted(() => {
               <div v-if="modelsStore.models.length === 0" class="text-xs text-gray-500 italic">
                 No models found
               </div>
-              <div v-else class="space-y-1 max-h-32 overflow-y-auto">
+              <div v-else class="space-y-1 max-h-40 overflow-y-auto">
                 <div
                   v-for="model in modelsStore.models"
                   :key="model.id"
                   class="flex items-center justify-between text-xs py-1.5 px-2 bg-gray-800 rounded"
                 >
                   <span class="flex items-center gap-2">
-                    <span v-if="model.status === 'loaded'" class="text-green-400">●</span>
-                    <span v-else-if="model.status === 'available'" class="text-yellow-400">●</span>
+                    <span v-if="model.status === 'available'" class="text-green-400">●</span>
                     <span v-else class="text-gray-600">○</span>
-                    <span :class="model.status !== 'downloadable' ? 'text-gray-200' : 'text-gray-500'">
+                    <span :class="model.status === 'available' ? 'text-gray-200' : 'text-gray-500'">
                       {{ model.name }} ({{ model.size }})
                     </span>
                   </span>
-                  <span v-if="model.status === 'loaded'" class="text-green-400 text-xs">Loaded</span>
-                  <span v-else-if="model.status === 'available'" class="text-yellow-400 text-xs">Ready</span>
-                  <span v-else class="text-gray-500 text-xs">Download</span>
+                  <div class="flex items-center gap-2">
+                    <!-- Download progress -->
+                    <div v-if="modelsStore.downloading === model.id" class="flex items-center gap-2">
+                      <div class="w-20 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                        <div
+                          class="h-full bg-cyan-400 transition-all duration-300"
+                          :style="{ width: `${modelsStore.downloadProgress[model.id] ?? 0}%` }"
+                        />
+                      </div>
+                      <span class="text-gray-400 text-xs whitespace-nowrap">{{ Math.round(modelsStore.downloadProgress[model.id] ?? 0) }}%</span>
+                    </div>
+                    <!-- Download button -->
+                    <button
+                      v-else-if="model.status === 'downloadable'"
+                      class="text-cyan-400 hover:text-cyan-300 text-xs"
+                      @click="modelsStore.downloadModel(model.id)"
+                    >
+                      Download
+                    </button>
+                    <!-- Delete button (downloaded models only) -->
+                    <button
+                      v-else-if="model.status === 'available' && model.downloadUrl"
+                      class="text-gray-500 hover:text-red-400 text-xs"
+                      @click="modelsStore.deleteModel(model.id)"
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
