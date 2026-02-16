@@ -5,7 +5,8 @@
   "type": "module",
   "license": "Apache-2.0",
   "scripts": {
-    "dev": "vite",
+    "dev": "npx tauri dev",
+    "dev:vite": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "build:linux": "npm run build && cd src-tauri && cargo tauri build --bundles deb,appimage,rpm",
     "build:windows": "npm run build && cd src-tauri && cargo tauri build --bundles msi,nsis",
