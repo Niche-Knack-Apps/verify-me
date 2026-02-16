@@ -11,12 +11,9 @@ const settings = useSettingsStore();
   <div class="app-container">
     <!-- Header -->
     <header class="app-header">
-      <h1 class="app-title">Verify Me</h1>
+      <h1 class="app-title">&gt; VERIFY ME_</h1>
       <button class="settings-btn" @click="settings.showSettings = true" title="Settings">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-        </svg>
+        [CFG]
       </button>
     </header>
 
@@ -27,14 +24,14 @@ const settings = useSettingsStore();
         :class="{ active: settings.activeTab === 'tts' }"
         @click="settings.activeTab = 'tts'"
       >
-        Text to Speech
+        {{ settings.activeTab === 'tts' ? '[*]' : '[ ]' }} TEXT-TO-SPEECH
       </button>
       <button
         class="tab-btn"
         :class="{ active: settings.activeTab === 'clone' }"
         @click="settings.activeTab = 'clone'"
       >
-        Voice Clone
+        {{ settings.activeTab === 'clone' ? '[*]' : '[ ]' }} VOICE CLONE
       </button>
     </nav>
 
@@ -47,9 +44,9 @@ const settings = useSettingsStore();
     <!-- Footer -->
     <footer class="app-footer">
       <span class="engine-status">
-        <span class="status-dot" :class="settings.engineRunning ? 'running' : 'stopped'" />
-        Engine: {{ settings.engineRunning ? 'Running' : 'Stopped' }}
-        ({{ settings.deviceType }})
+        <span class="status-indicator">{{ settings.engineRunning ? '[ONLINE]' : '[OFFLINE]' }}</span>
+        ENGINE: {{ settings.engineRunning ? 'RUNNING' : 'STOPPED' }}
+        // {{ settings.deviceType.toUpperCase() }}
       </span>
     </footer>
 
@@ -71,15 +68,17 @@ const settings = useSettingsStore();
   align-items: center;
   justify-content: space-between;
   padding: 0.75rem 1rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--crt-border);
   flex-shrink: 0;
 }
 
 .app-title {
-  font-size: 1.25rem;
-  font-weight: 700;
-  color: var(--color-accent);
+  font-size: 1.5rem;
+  font-weight: 400;
+  color: var(--crt-bright);
   margin: 0;
+  text-shadow: 0 0 8px rgba(51, 255, 0, 0.6), 0 0 16px rgba(51, 255, 0, 0.3);
+  letter-spacing: 0.1em;
 }
 
 .settings-btn {
@@ -89,19 +88,23 @@ const settings = useSettingsStore();
   align-items: center;
   justify-content: center;
   background: transparent;
-  color: var(--color-text);
-  border: none;
-  border-radius: 0.375rem;
+  color: var(--crt-dim);
+  border: 1px solid var(--crt-border);
+  border-radius: 0;
   cursor: pointer;
-  transition: color 0.15s;
+  font-family: 'VT323', monospace;
+  font-size: 18px;
+  transition: color 0.15s, border-color 0.15s;
 }
 .settings-btn:hover {
-  color: var(--color-accent);
+  color: var(--crt-bright);
+  border-color: var(--crt-bright);
+  text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
 }
 
 .tab-bar {
   display: flex;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--crt-border);
   flex-shrink: 0;
 }
 
@@ -109,21 +112,26 @@ const settings = useSettingsStore();
   flex: 1;
   min-height: 44px;
   padding: 0.625rem 1rem;
-  font-size: 0.9rem;
-  font-weight: 500;
+  font-family: 'VT323', monospace;
+  font-size: 18px;
   background: transparent;
-  color: #9ca3af;
+  color: var(--crt-dim);
   border: none;
   border-bottom: 2px solid transparent;
+  border-radius: 0;
   cursor: pointer;
   transition: color 0.15s, border-color 0.15s;
+  text-shadow: none;
+  letter-spacing: 0.05em;
 }
 .tab-btn:hover {
-  color: var(--color-text);
+  color: var(--crt-text);
+  text-shadow: var(--crt-glow);
 }
 .tab-btn.active {
-  color: var(--color-accent);
-  border-bottom-color: var(--color-accent);
+  color: var(--crt-bright);
+  border-bottom-color: var(--crt-bright);
+  text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
 }
 
 .content-area {
@@ -137,7 +145,7 @@ const settings = useSettingsStore();
   align-items: center;
   justify-content: center;
   padding: 0.5rem 1rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--crt-border);
   flex-shrink: 0;
 }
 
@@ -145,20 +153,12 @@ const settings = useSettingsStore();
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  font-size: 0.8rem;
-  color: #9ca3af;
+  font-size: 16px;
+  color: var(--crt-dim);
+  letter-spacing: 0.05em;
 }
 
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-.status-dot.running {
-  background: #22c55e;
-  box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
-}
-.status-dot.stopped {
-  background: #6b7280;
+.status-indicator {
+  color: var(--crt-text);
 }
 </style>
