@@ -1,0 +1,11 @@
+node_modules/
+dist/
+src-tauri/target/
+android/app/build/
+android/.gradle/
+engine/__pycache__/
+engine/.venv/
+*.pyc
+.env
+.DS_Store
+*.log

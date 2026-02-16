@@ -1,0 +1,48 @@
+{
+  "name": "verify-me",
+  "version": "0.1.0",
+  "description": "Text-to-Speech and Voice Cloning desktop application",
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "build:linux": "npm run build && cd src-tauri && cargo tauri build --bundles deb,appimage,rpm",
+    "build:windows": "npm run build && cd src-tauri && cargo tauri build --bundles msi,nsis",
+    "build:mac": "npm run build && cd src-tauri && cargo tauri build --bundles dmg",
+    "build:release": "bash scripts/copy-to-releases.sh",
+    "typecheck": "vue-tsc --noEmit",
+    "cap:sync": "npx cap sync android",
+    "cap:open": "CAPACITOR_ANDROID_STUDIO_PATH=$HOME/android-studio/bin/studio.sh npx cap open android",
+    "build:android": "npx cap sync android && cd android && ./gradlew assembleRelease",
+    "build:android:aab": "npx cap sync android && cd android && ./gradlew bundleRelease",
+    "build:android:debug": "npx cap sync android && cd android && ./gradlew assembleDebug",
+    "dev:android": "npx cap sync android && npx cap run android"
+  },
+  "dependencies": {
+    "vue": "^3.5.0",
+    "pinia": "^2.2.0",
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "@tauri-apps/plugin-fs": "^2.0.0",
+    "@tauri-apps/plugin-shell": "^2.0.0",
+    "@vueuse/core": "^11.0.0",
+    "@capacitor/core": "^6.0.0",
+    "@capacitor/android": "^6.0.0",
+    "@capacitor/filesystem": "^6.0.0",
+    "@capacitor/preferences": "^6.0.0",
+    "@capacitor/app": "^6.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0",
+    "@vitejs/plugin-vue": "^5.0.0",
+    "vue-tsc": "^2.1.0",
+    "tailwindcss": "^3.4.0",
+    "autoprefixer": "^10.4.0",
+    "postcss": "^8.4.0",
+    "@tailwindcss/forms": "^0.5.0",
+    "@capacitor/cli": "^6.0.0"
+  }
+}
