@@ -15,7 +15,7 @@ async function selectReferenceAudio() {
     const { open } = await import('@tauri-apps/plugin-dialog');
     const selected = await open({
       multiple: false,
-      filters: [{ name: 'Audio', extensions: ['wav', 'mp3', 'flac', 'ogg', 'm4a'] }],
+      filters: [{ name: 'Audio', extensions: ['wav', 'mp3', 'flac', 'ogg', 'm4a', 'webm'] }],
     });
     if (selected) {
       tts.referenceAudioPath = selected as string;
@@ -28,6 +28,18 @@ async function selectReferenceAudio() {
 function getFileName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
+
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function levelColor(level: number): string {
+  if (level > 0.9) return '#ef4444';
+  if (level > 0.75) return '#eab308';
+  return '#22c55e';
+}
 </script>
 
 <template>
@@ -35,24 +47,48 @@ function getFileName(path: string): string {
     <!-- Reference Audio -->
     <div class="reference-section">
       <label class="field-label">Reference Audio</label>
-      <div class="reference-controls">
-        <button class="upload-btn" @click="selectReferenceAudio">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-          </svg>
-          <span>Choose Audio File</span>
-        </button>
-        <button class="record-btn" @click="tts.isRecording = !tts.isRecording" :class="{ recording: tts.isRecording }">
+
+      <!-- Recording active -->
+      <div v-if="tts.isRecording" class="recording-panel">
+        <div class="recording-header">
+          <span class="recording-dot" />
+          <span class="recording-label">Recording</span>
+          <span class="recording-time">{{ formatTime(tts.recordingDuration) }}</span>
+        </div>
+        <div class="level-meter">
+          <div
+            class="level-fill"
+            :style="{ width: `${tts.currentLevel * 100}%`, backgroundColor: levelColor(tts.currentLevel) }"
+          />
+        </div>
+        <button class="stop-btn" @click="tts.stopRecording()">
           <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-            <circle v-if="!tts.isRecording" cx="12" cy="12" r="6" />
-            <rect v-else x="8" y="8" width="8" height="8" rx="1" />
+            <rect x="6" y="6" width="12" height="12" rx="1" />
           </svg>
-          <span>{{ tts.isRecording ? 'Stop' : 'Record' }}</span>
+          <span>Stop Recording</span>
         </button>
       </div>
-      <p v-if="tts.referenceAudioPath" class="reference-file">
-        {{ getFileName(tts.referenceAudioPath) }}
-      </p>
+
+      <!-- Not recording -->
+      <template v-else>
+        <div class="reference-controls">
+          <button class="upload-btn" @click="selectReferenceAudio">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+            </svg>
+            <span>Choose Audio File</span>
+          </button>
+          <button class="record-btn" @click="tts.startRecording()">
+            <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="6" />
+            </svg>
+            <span>Record</span>
+          </button>
+        </div>
+        <p v-if="tts.referenceAudioPath" class="reference-file">
+          {{ getFileName(tts.referenceAudioPath) }}
+        </p>
+      </template>
     </div>
 
     <ModelSelector v-model:modelValue="tts.selectedModelId" :model-filter="cloneFilter" />
@@ -134,10 +170,6 @@ function getFileName(path: string): string {
 .record-btn:hover {
   border-color: var(--color-accent);
 }
-.record-btn.recording {
-  border-color: #f87171;
-  color: #f87171;
-}
 
 .reference-file {
   font-size: 0.8rem;
@@ -146,6 +178,82 @@ function getFileName(path: string): string {
   background: rgba(34, 211, 238, 0.08);
   border-radius: 0.25rem;
   word-break: break-all;
+}
+
+/* Recording panel */
+.recording-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.875rem;
+  background: var(--color-surface);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 0.375rem;
+}
+
+.recording-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.recording-dot {
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 50%;
+  background: #ef4444;
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.recording-label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #ef4444;
+}
+
+.recording-time {
+  margin-left: auto;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  color: #d1d5db;
+}
+
+.level-meter {
+  height: 6px;
+  background: #374151;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.level-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 75ms linear, background-color 150ms;
+  min-width: 2px;
+}
+
+.stop-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.625rem 1rem;
+  min-height: 44px;
+  font-size: 0.875rem;
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 0.375rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.stop-btn:hover {
+  background: rgba(239, 68, 68, 0.2);
 }
 
 .text-input {

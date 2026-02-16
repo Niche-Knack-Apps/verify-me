@@ -3,7 +3,7 @@
 mod commands;
 mod services;
 
-use commands::{tts, models, engine};
+use commands::{tts, models, engine, recording};
 
 fn main() {
     env_logger::init();
@@ -29,6 +29,10 @@ fn main() {
             models::download_model,
             models::delete_model,
             models::get_models_directory,
+            models::open_models_directory,
+            recording::start_recording,
+            recording::stop_recording,
+            recording::get_recording_level,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
