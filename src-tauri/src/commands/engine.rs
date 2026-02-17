@@ -70,7 +70,7 @@ fn resolve_engine_paths(app: &AppHandle) -> Result<EnginePaths, String> {
 }
 
 #[tauri::command]
-pub async fn start_engine(app: AppHandle) -> Result<String, String> {
+pub async fn start_engine(app: AppHandle, force_cpu: Option<bool>) -> Result<String, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
@@ -80,6 +80,11 @@ pub async fn start_engine(app: AppHandle) -> Result<String, String> {
     let script_str = paths.script.to_str().ok_or("Invalid engine path")?.to_string();
     let models_str = paths.models_dir.to_str().unwrap_or("").to_string();
 
+    let mut env_vars = vec![("VERIFY_ME_MODELS_DIR", models_str)];
+    if force_cpu.unwrap_or(false) {
+        env_vars.push(("VERIFY_ME_FORCE_CPU", "1".to_string()));
+    }
+
     let mut manager = state
         .0
         .lock()
@@ -88,7 +93,7 @@ pub async fn start_engine(app: AppHandle) -> Result<String, String> {
     manager.start(
         &python_str,
         &script_str,
-        vec![("VERIFY_ME_MODELS_DIR", models_str)],
+        env_vars,
     )?;
     Ok("Engine started successfully".into())
 }

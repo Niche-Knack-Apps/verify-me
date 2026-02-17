@@ -8,6 +8,7 @@ const STORAGE_KEY = 'verify-me-settings';
 interface PersistedSettings {
   theme: ThemeMode;
   hfToken: string;
+  forceCpu: boolean;
 }
 
 function loadSettings(): PersistedSettings {
@@ -16,13 +17,13 @@ function loadSettings(): PersistedSettings {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed.theme === 'modern' || parsed.theme === 'eighties') {
-        return { theme: parsed.theme, hfToken: parsed.hfToken ?? '' };
+        return { theme: parsed.theme, hfToken: parsed.hfToken ?? '', forceCpu: parsed.forceCpu ?? false };
       }
     }
   } catch {
     // Ignore invalid storage
   }
-  return { theme: 'modern', hfToken: '' };
+  return { theme: 'modern', hfToken: '', forceCpu: false };
 }
 
 function saveSettings(settings: PersistedSettings) {
@@ -44,6 +45,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const modelsDirectory = ref('');
   const theme = ref<ThemeMode>(persisted.theme);
   const hfToken = ref(persisted.hfToken);
+  const forceCpu = ref(persisted.forceCpu);
 
   const isEighties = computed(() => theme.value === 'eighties');
 
@@ -56,7 +58,7 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   function persistAll() {
-    saveSettings({ theme: theme.value, hfToken: hfToken.value });
+    saveSettings({ theme: theme.value, hfToken: hfToken.value, forceCpu: forceCpu.value });
   }
 
   function setTheme(mode: ThemeMode) {
@@ -70,6 +72,11 @@ export const useSettingsStore = defineStore('settings', () => {
     persistAll();
   }
 
+  function setForceCpu(force: boolean) {
+    forceCpu.value = force;
+    persistAll();
+  }
+
   function toggleTheme() {
     setTheme(theme.value === 'modern' ? 'eighties' : 'modern');
   }
@@ -80,7 +87,7 @@ export const useSettingsStore = defineStore('settings', () => {
   async function startEngine() {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
-      await invoke<string>('start_engine');
+      await invoke<string>('start_engine', { forceCpu: forceCpu.value });
       engineRunning.value = true;
       await updateDeviceInfo();
     } catch (e) {
@@ -147,9 +154,11 @@ export const useSettingsStore = defineStore('settings', () => {
     modelsDirectory,
     theme,
     hfToken,
+    forceCpu,
     isEighties,
     setTheme,
     setHfToken,
+    setForceCpu,
     toggleTheme,
     startEngine,
     stopEngine,

@@ -1,4 +1,5 @@
 use crate::commands::engine::EngineState;
+use crate::commands::models::VoiceInfo;
 use crate::services::path_service;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
@@ -113,7 +114,7 @@ pub async fn voice_clone(
 pub async fn get_voices(
     app: AppHandle,
     model_id: String,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<VoiceInfo>, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
@@ -136,7 +137,26 @@ pub async fn get_voices(
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter_map(|v| {
+                    // Handle voice objects: {"id": "...", "name": "...", "language": "..."}
+                    if let Some(obj) = v.as_object() {
+                        let id = obj.get("id")?.as_str()?.to_string();
+                        let name = obj
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or_else(|| obj.get("id").unwrap().as_str().unwrap())
+                            .to_string();
+                        Some(VoiceInfo { id, name })
+                    } else if let Some(s) = v.as_str() {
+                        // Fallback: plain string voice IDs
+                        Some(VoiceInfo {
+                            id: s.to_string(),
+                            name: s.to_string(),
+                        })
+                    } else {
+                        None
+                    }
+                })
                 .collect()
         })
         .ok_or_else(|| "Engine did not return voices".into())

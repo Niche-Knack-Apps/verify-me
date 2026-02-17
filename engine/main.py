@@ -2,13 +2,22 @@
 Verify Me TTS Engine — JSON-RPC 2.0 stdio server.
 
 Reads JSON lines from stdin, writes JSON responses to stdout.
+All logging goes to stderr to avoid corrupting the JSON-RPC channel.
 """
 
 import json
+import logging
 import sys
 import os
 import signal
 import traceback
+
+# Force ALL logging to stderr — stdout is reserved for JSON-RPC only
+logging.basicConfig(
+    stream=sys.stderr,
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 from tts_engine import TTSEngine
 from device_manager import get_device, get_device_info
@@ -44,6 +53,10 @@ def handle_engine_health(req_id, _params):
         "version": VERSION,
         "device": get_device(),
     })
+
+
+def handle_engine_device_info(req_id, _params):
+    return success_response(req_id, get_device_info())
 
 
 def handle_engine_shutdown(req_id, _params):
@@ -125,6 +138,7 @@ def handle_voice_clone(req_id, params):
 
 METHOD_HANDLERS = {
     "engine.health": handle_engine_health,
+    "engine.device_info": handle_engine_device_info,
     "engine.shutdown": handle_engine_shutdown,
     "models.list": handle_models_list,
     "models.load": handle_models_load,

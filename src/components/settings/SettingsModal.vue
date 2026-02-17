@@ -202,6 +202,19 @@ onMounted(() => {
                 }}
               </span>
             </div>
+            <div class="config-row">
+              <span class="config-key">Force CPU</span>
+              <Toggle
+                :model-value="settings.forceCpu"
+                @update:model-value="settings.setForceCpu($event)"
+              />
+            </div>
+            <p class="config-hint">
+              {{ settings.isEighties
+                ? '// REQUIRES ENGINE RESTART TO TAKE EFFECT'
+                : 'Requires engine restart to take effect'
+              }}
+            </p>
           </div>
         </div>
 
