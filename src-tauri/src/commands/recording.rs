@@ -75,9 +75,7 @@ pub async fn start_recording(_app: AppHandle) -> Result<(), String> {
         config_range.with_sample_rate(target_rate)
     } else {
         let rate48 = cpal::SampleRate(48000);
-        if config_range.min_sample_rate() <= rate48
-            && config_range.max_sample_rate() >= rate48
-        {
+        if config_range.min_sample_rate() <= rate48 && config_range.max_sample_rate() >= rate48 {
             config_range.with_sample_rate(rate48)
         } else {
             config_range.with_max_sample_rate()
@@ -116,7 +114,9 @@ pub async fn start_recording(_app: AppHandle) -> Result<(), String> {
     }
     .map_err(|e| format!("Failed to build input stream: {e}"))?;
 
-    stream.play().map_err(|e| format!("Failed to start stream: {e}"))?;
+    stream
+        .play()
+        .map_err(|e| format!("Failed to start stream: {e}"))?;
 
     {
         let mut holder = RECORDING_STREAM.lock().map_err(|e| e.to_string())?;

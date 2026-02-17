@@ -12,6 +12,40 @@ fn ensure_engine_state(app: &AppHandle) {
     }
 }
 
+/// Resolve the venv Python path for the current platform.
+/// Windows: engine/.venv/Scripts/python.exe
+/// Unix:    engine/.venv/bin/python3
+pub fn venv_python_path(project_root: &std::path::Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        project_root
+            .join("engine")
+            .join(".venv")
+            .join("Scripts")
+            .join("python.exe")
+    } else {
+        project_root
+            .join("engine")
+            .join(".venv")
+            .join("bin")
+            .join("python3")
+    }
+}
+
+/// Resolve system Python command for the current platform.
+/// Checks VERIFY_ME_PYTHON env var first, then platform default.
+pub fn system_python() -> PathBuf {
+    if let Ok(custom) = std::env::var("VERIFY_ME_PYTHON") {
+        if !custom.is_empty() {
+            return PathBuf::from(custom);
+        }
+    }
+    if cfg!(target_os = "windows") {
+        PathBuf::from("python")
+    } else {
+        PathBuf::from("python3")
+    }
+}
+
 struct EnginePaths {
     python: PathBuf,
     script: PathBuf,
@@ -27,7 +61,7 @@ fn resolve_engine_paths(app: &AppHandle) -> Result<EnginePaths, String> {
             .ok_or("Failed to resolve project root")?
             .to_path_buf();
 
-        let venv_python = project_root.join("engine/.venv/bin/python3");
+        let venv_python = venv_python_path(&project_root);
         let script = project_root.join("engine/main.py");
         let models_dir = project_root.join("src-tauri/resources/models");
 
@@ -42,7 +76,7 @@ fn resolve_engine_paths(app: &AppHandle) -> Result<EnginePaths, String> {
         // Fall back to system python if no venv
         if script.exists() {
             return Ok(EnginePaths {
-                python: PathBuf::from("python3"),
+                python: system_python(),
                 script,
                 models_dir,
             });
@@ -63,7 +97,7 @@ fn resolve_engine_paths(app: &AppHandle) -> Result<EnginePaths, String> {
     }
 
     Ok(EnginePaths {
-        python: PathBuf::from("python3"),
+        python: system_python(),
         script,
         models_dir,
     })
@@ -76,8 +110,16 @@ pub async fn start_engine(app: AppHandle, force_cpu: Option<bool>) -> Result<Str
 
     let paths = resolve_engine_paths(&app)?;
 
-    let python_str = paths.python.to_str().ok_or("Invalid python path")?.to_string();
-    let script_str = paths.script.to_str().ok_or("Invalid engine path")?.to_string();
+    let python_str = paths
+        .python
+        .to_str()
+        .ok_or("Invalid python path")?
+        .to_string();
+    let script_str = paths
+        .script
+        .to_str()
+        .ok_or("Invalid engine path")?
+        .to_string();
     let models_str = paths.models_dir.to_str().unwrap_or("").to_string();
 
     let mut env_vars = vec![("VERIFY_ME_MODELS_DIR", models_str)];
@@ -85,16 +127,9 @@ pub async fn start_engine(app: AppHandle, force_cpu: Option<bool>) -> Result<Str
         env_vars.push(("VERIFY_ME_FORCE_CPU", "1".to_string()));
     }
 
-    let mut manager = state
-        .0
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
+    let mut manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
 
-    manager.start(
-        &python_str,
-        &script_str,
-        env_vars,
-    )?;
+    manager.start(&python_str, &script_str, env_vars)?;
     Ok("Engine started successfully".into())
 }
 
@@ -103,10 +138,7 @@ pub async fn stop_engine(app: AppHandle) -> Result<String, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let mut manager = state
-        .0
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
+    let mut manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
 
     manager.stop()?;
     Ok("Engine stopped".into())
@@ -117,10 +149,7 @@ pub async fn engine_health(app: AppHandle) -> Result<Value, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let manager = state
-        .0
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
+    let manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
 
     if !manager.is_running() {
         return Ok(serde_json::json!({
@@ -130,7 +159,14 @@ pub async fn engine_health(app: AppHandle) -> Result<Value, String> {
     }
 
     match manager.health_check() {
-        Ok(health) => Ok(health),
+        Ok(health) => {
+            // Merge engine_running into the Python health response
+            let mut obj = health;
+            if let Some(map) = obj.as_object_mut() {
+                map.insert("engine_running".to_string(), serde_json::json!(true));
+            }
+            Ok(obj)
+        }
         Err(e) => Ok(serde_json::json!({
             "status": "error",
             "engine_running": true,
@@ -144,10 +180,7 @@ pub async fn get_device_info(app: AppHandle) -> Result<Value, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let manager = state
-        .0
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
+    let manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
 
     if !manager.is_running() {
         return Err("Engine is not running".into());

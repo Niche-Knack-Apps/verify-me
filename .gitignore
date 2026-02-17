@@ -10,4 +10,5 @@ src-tauri/resources/models/pocket-tts/
 src-tauri/resources/models/*.safetensors
 .env
 .DS_Store
+.ruff_cache/
 *.log

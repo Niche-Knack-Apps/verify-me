@@ -4,8 +4,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Default timeout for JSON-RPC responses from the Python engine.
+/// TTS generation can take 30+ seconds on CPU, so we use a generous limit.
+const ENGINE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Serialize)]
 struct JsonRpcRequest {
@@ -76,10 +81,18 @@ impl EngineManager {
             .spawn()
             .map_err(|e| format!("Failed to spawn engine process: {}", e))?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or("Failed to capture engine stdin")?;
+        // Check for immediate crash (e.g., Python not found, import error)
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(ref mut proc) = Some(&mut child) {
+            if let Ok(Some(status)) = proc.try_wait() {
+                return Err(format!(
+                    "Engine exited immediately with status: {}. Check Python installation and dependencies.",
+                    status
+                ));
+            }
+        }
+
+        let stdin = child.stdin.take().ok_or("Failed to capture engine stdin")?;
         let stdout = child
             .stdout
             .take()
@@ -117,19 +130,9 @@ impl EngineManager {
         Ok(())
     }
 
-    pub fn send_request(
-        &self,
-        method: &str,
-        params: Option<Value>,
-    ) -> Result<Value, String> {
-        let stdin_lock = self
-            .stdin
-            .as_ref()
-            .ok_or("Engine not running")?;
-        let stdout_lock = self
-            .stdout
-            .as_ref()
-            .ok_or("Engine not running")?;
+    pub fn send_request(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        let stdin_lock = self.stdin.as_ref().ok_or("Engine not running")?;
+        let stdout_lock = self.stdout.as_ref().ok_or("Engine not running")?;
 
         let id = REQUEST_ID.fetch_add(1, Ordering::SeqCst);
 
@@ -157,25 +160,67 @@ impl EngineManager {
                 .map_err(|e| format!("Failed to flush engine stdin: {}", e))?;
         }
 
-        // Read response
-        let mut response_line = String::new();
-        {
-            let mut stdout = stdout_lock
-                .lock()
-                .map_err(|e| format!("Stdout lock error: {}", e))?;
-            stdout
-                .read_line(&mut response_line)
-                .map_err(|e| format!("Failed to read from engine: {}", e))?;
-        }
+        // Read response with timeout.
+        // We use a scoped thread for the blocking read_line() with a channel
+        // + recv_timeout to avoid hanging indefinitely if the engine dies.
+        let response_line = {
+            let (tx, rx) = std::sync::mpsc::channel();
 
-        let response: JsonRpcResponse = serde_json::from_str(&response_line)
-            .map_err(|e| format!("Failed to parse engine response: {} (raw: {})", e, response_line.trim()))?;
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    let Ok(mut stdout) = stdout_lock.lock() else {
+                        let _ = tx.send(Err("Stdout lock poisoned".to_string()));
+                        return;
+                    };
+                    let mut line = String::new();
+                    match stdout.read_line(&mut line) {
+                        Ok(_) => {
+                            let _ = tx.send(Ok(line));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(format!("Failed to read from engine: {}", e)));
+                        }
+                    }
+                });
+
+                match rx.recv_timeout(ENGINE_TIMEOUT) {
+                    Ok(Ok(line)) => {
+                        if line.is_empty() {
+                            Err(format!(
+                                "Engine closed connection (method: {}). The Python process may have crashed.",
+                                method
+                            ))
+                        } else {
+                            Ok(line)
+                        }
+                    }
+                    Ok(Err(e)) => Err(e),
+                    Err(_) => {
+                        Err(format!(
+                            "Engine timed out after {}s (method: {}). The engine may be overloaded or hung.",
+                            ENGINE_TIMEOUT.as_secs(),
+                            method
+                        ))
+                    }
+                }
+            })?
+        };
+
+        let response: JsonRpcResponse = serde_json::from_str(&response_line).map_err(|e| {
+            format!(
+                "Failed to parse engine response: {} (raw: {})",
+                e,
+                response_line.trim()
+            )
+        })?;
 
         if let Some(error) = response.error {
             return Err(format!("Engine error: {}", error.message));
         }
 
-        response.result.ok_or_else(|| "Empty response from engine".into())
+        response
+            .result
+            .ok_or_else(|| "Empty response from engine".into())
     }
 
     pub fn health_check(&self) -> Result<Value, String> {

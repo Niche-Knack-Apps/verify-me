@@ -7,10 +7,9 @@ All logging goes to stderr to avoid corrupting the JSON-RPC channel.
 
 import json
 import logging
-import sys
 import os
 import signal
-import traceback
+import sys
 
 # Force ALL logging to stderr — stdout is reserved for JSON-RPC only
 logging.basicConfig(
@@ -19,10 +18,17 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-from tts_engine import TTSEngine
-from device_manager import get_device, get_device_info
+# Save the real stdout for JSON-RPC, then redirect sys.stdout to stderr.
+# This prevents ANY third-party library (torch, transformers, tqdm, etc.)
+# from corrupting the JSON-RPC channel by printing to stdout.
+_real_stdout = sys.stdout
+sys.stdout = sys.stderr
+
+from device_manager import get_device, get_device_info  # noqa: E402
+from tts_engine import TTSEngine  # noqa: E402
 
 VERSION = "0.1.0"
+logger = logging.getLogger(__name__)
 
 engine = TTSEngine()
 running = True
@@ -164,13 +170,36 @@ def dispatch(request):
     if not handler:
         return error_response(req_id, METHOD_NOT_FOUND, f"Unknown method: {method}")
 
-    return handler(req_id, params)
+    logger.info("RPC [%s] method=%s params=%s", req_id, method, _truncate_params(params))
+    try:
+        response = handler(req_id, params)
+        if response.get("error"):
+            logger.error("RPC [%s] error: %s", req_id, response["error"])
+        else:
+            logger.info("RPC [%s] ok", req_id)
+        return response
+    except Exception as e:
+        logger.exception("RPC [%s] unhandled exception in %s", req_id, method)
+        return error_response(req_id, INTERNAL_ERROR, str(e))
+
+
+def _truncate_params(params):
+    """Truncate large param values for logging."""
+    if not isinstance(params, dict):
+        return params
+    out = {}
+    for k, v in params.items():
+        if isinstance(v, str) and len(v) > 100:
+            out[k] = v[:100] + "..."
+        else:
+            out[k] = v
+    return out
 
 
 def write_response(response):
     line = json.dumps(response)
-    sys.stdout.write(line + "\n")
-    sys.stdout.flush()
+    _real_stdout.write(line + "\n")
+    _real_stdout.flush()
 
 
 def main():

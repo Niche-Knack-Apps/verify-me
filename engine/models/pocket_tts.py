@@ -67,12 +67,11 @@ def _create_local_config(model_dir):
     config["flow_lm"]["lookup_table"]["tokenizer_path"] = tokenizer_path
 
     # Write temporary config
-    tmp = tempfile.NamedTemporaryFile(
+    with tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", prefix="pocket_tts_", delete=False
-    )
-    yaml.dump(config, tmp, default_flow_style=False)
-    tmp.close()
-    return tmp.name
+    ) as tmp:
+        yaml.dump(config, tmp, default_flow_style=False)
+        return tmp.name
 
 
 class PocketTTSModel:

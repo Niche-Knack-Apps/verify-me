@@ -5,7 +5,10 @@ Spawned as a subprocess by the Rust backend for downloading
 HuggingFace model repositories to the app's models directory.
 
 Usage:
-    python download_model.py '{"repo_id": "...", "local_dir": "...", "token": "..."}'
+    python download_model.py '{"repo_id": "...", "local_dir": "..."}'
+
+The HuggingFace token is read from the HF_TOKEN environment variable
+(not passed via CLI args, to avoid leaking in process listings).
 
 Outputs JSON status lines to stdout:
     {"status": "downloading", "repo_id": "...", "local_dir": "..."}
@@ -41,7 +44,8 @@ def main():
 
     repo_id = args.get("repo_id")
     local_dir = args.get("local_dir")
-    token = args.get("token")
+    # Read token from environment (safer than CLI args which are visible in ps)
+    token = os.environ.get("HF_TOKEN") or args.get("token")
 
     if not repo_id or not local_dir:
         emit("error", message="repo_id and local_dir are required")

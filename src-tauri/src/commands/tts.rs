@@ -43,10 +43,7 @@ pub async fn generate_speech(
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let manager = state
-        .0
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
+    let manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
 
     if !manager.is_running() {
         return Err("Engine is not running. Start the engine first.".into());
@@ -84,10 +81,7 @@ pub async fn voice_clone(
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let manager = state
-        .0
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
+    let manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
 
     if !manager.is_running() {
         return Err("Engine is not running. Start the engine first.".into());
@@ -111,17 +105,11 @@ pub async fn voice_clone(
 }
 
 #[tauri::command]
-pub async fn get_voices(
-    app: AppHandle,
-    model_id: String,
-) -> Result<Vec<VoiceInfo>, String> {
+pub async fn get_voices(app: AppHandle, model_id: String) -> Result<Vec<VoiceInfo>, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let manager = state
-        .0
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
+    let manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
 
     if !manager.is_running() {
         return Err("Engine is not running. Start the engine first.".into());

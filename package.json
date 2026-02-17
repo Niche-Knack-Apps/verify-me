@@ -18,7 +18,9 @@
     "build:android": "npx cap sync android && cd android && ./gradlew assembleRelease",
     "build:android:aab": "npx cap sync android && cd android && ./gradlew bundleRelease",
     "build:android:debug": "npx cap sync android && cd android && ./gradlew assembleDebug",
-    "dev:android": "npx cap sync android && npx cap run android"
+    "dev:android": "npx cap sync android && npx cap run android",
+    "format": "npx prettier --write 'src/**/*.{ts,vue,css}' '*.{json,js}'",
+    "format:check": "npx prettier --check 'src/**/*.{ts,vue,css}' '*.{json,js}'"
   },
   "dependencies": {
     "vue": "^3.5.0",

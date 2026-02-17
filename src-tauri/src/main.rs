@@ -3,7 +3,7 @@
 mod commands;
 mod services;
 
-use commands::{tts, models, engine, recording};
+use commands::{engine, models, recording, tts};
 
 fn main() {
     env_logger::init();
