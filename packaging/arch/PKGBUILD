@@ -4,7 +4,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Text-to-Speech and Voice Cloning desktop application"
 arch=('x86_64')
-url="https://github.com/niche-knack/verify-me"
+url="https://github.com/Niche-Knack-Apps/verify-me"
 license=('Apache-2.0')
 depends=(
     'webkit2gtk-4.1'
@@ -14,6 +14,9 @@ depends=(
     'gdk-pixbuf2'
     'libappindicator-gtk3'
     'librsvg'
+    'python'
+    'python-pytorch'
+    'alsa-lib'
 )
 makedepends=(
     'rust'
@@ -26,13 +29,15 @@ makedepends=(
 provides=('verify-me')
 conflicts=('verify-me-bin' 'verify-me-git')
 source=(
-    "$pkgname-$pkgver.tar.gz::https://github.com/niche-knack/verify-me/archive/v$pkgver.tar.gz"
+    "$pkgname-$pkgver.tar.gz::https://github.com/Niche-Knack-Apps/verify-me/archive/v$pkgver.tar.gz"
 )
 sha256sums=('SKIP')
 
 build() {
     cd "$srcdir/$pkgname-$pkgver"
     npm ci
+    npx vue-tsc --noEmit
+    npx vite build
     cd src-tauri
     cargo build --release
 }

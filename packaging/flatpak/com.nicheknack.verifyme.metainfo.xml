@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.nicheknack.verifyme</id>
+  <name>Verify Me</name>
+  <summary>Text-to-Speech and Voice Cloning application</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+
+  <developer id="com.nicheknack">
+    <name>Niche-Knack Apps</name>
+  </developer>
+
+  <description>
+    <p>
+      Verify Me is a desktop application for text-to-speech synthesis and
+      voice cloning. It ships with Pocket TTS, a lightweight CPU-friendly
+      model, and supports downloading Qwen 3 TTS for higher-quality
+      multilingual speech generation.
+    </p>
+    <p>Features include:</p>
+    <ul>
+      <li>Text-to-speech with multiple voices</li>
+      <li>Voice cloning from reference audio</li>
+      <li>Multiple TTS models (Pocket TTS bundled, Qwen 3 downloadable)</li>
+      <li>Instruction-based voice control</li>
+      <li>CPU-first design with GPU acceleration support</li>
+    </ul>
+  </description>
+
+  <url type="homepage">https://nicheknack.app</url>
+  <url type="bugtracker">https://github.com/Niche-Knack-Apps/verify-me/issues</url>
+
+  <launchable type="desktop-id">com.nicheknack.verifyme.desktop</launchable>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.0" date="2026-02-17">
+      <description><p>Initial release</p></description>
+    </release>
+  </releases>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">700</display_length>
+  </requires>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+  </categories>
+
+  <keywords>
+    <keyword>tts</keyword>
+    <keyword>speech</keyword>
+    <keyword>voice</keyword>
+    <keyword>cloning</keyword>
+    <keyword>synthesis</keyword>
+  </keywords>
+</component>

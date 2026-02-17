@@ -15,7 +15,7 @@ cd "$PROJECT_ROOT"
 # App-specific configuration
 APP_NAME="verify-me"
 BINARY_NAME="verify-me"
-APP_ID="com.niche-knack.verify-me"
+APP_ID="com.nicheknack.verifyme"
 VERSION=$(node -p "require('./package.json').version")
 RELEASES_DIR="../_shared/releases/$APP_NAME"
 FLATPAK_DIR="$PROJECT_ROOT/packaging/flatpak"

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Verify Me
+GenericName=Text-to-Speech
+Comment=Text-to-Speech and Voice Cloning application
+Exec=verify-me %F
+Icon=com.nicheknack.verifyme
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;
+Keywords=tts;speech;voice;cloning;synthesis;
+StartupNotify=true
+StartupWMClass=verify-me
