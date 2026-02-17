@@ -12,6 +12,7 @@ class TTSEngine:
     def __init__(self):
         self._current_model_id = None
         self._current_model = None
+        self._models_dir = os.environ.get("VERIFY_ME_MODELS_DIR")
 
     def list_models(self):
         """List all registered models with their status."""
@@ -38,7 +39,7 @@ class TTSEngine:
 
         model_class = MODEL_REGISTRY[model_id]
         self._current_model = model_class()
-        self._current_model.load()
+        self._current_model.load(models_dir=self._models_dir)
         self._current_model_id = model_id
 
     def unload_model(self):

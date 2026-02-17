@@ -190,7 +190,13 @@ export const useTTSStore = defineStore('tts', () => {
         params.voicePrompt = voicePrompt.value.trim();
       }
       const result = await invoke<string>('generate_speech', params);
-      outputAudioPath.value = result;
+      const { readFile } = await import('@tauri-apps/plugin-fs');
+      const bytes = await readFile(result);
+      const blob = new Blob([bytes], { type: 'audio/wav' });
+      if (outputAudioPath.value?.startsWith('blob:')) {
+        URL.revokeObjectURL(outputAudioPath.value);
+      }
+      outputAudioPath.value = URL.createObjectURL(blob);
     } catch (e) {
       error.value = String(e);
     } finally {
@@ -209,7 +215,13 @@ export const useTTSStore = defineStore('tts', () => {
         referenceAudio: referenceAudioPath.value,
         modelId: selectedModelId.value,
       });
-      outputAudioPath.value = result;
+      const { readFile } = await import('@tauri-apps/plugin-fs');
+      const bytes = await readFile(result);
+      const blob = new Blob([bytes], { type: 'audio/wav' });
+      if (outputAudioPath.value?.startsWith('blob:')) {
+        URL.revokeObjectURL(outputAudioPath.value);
+      }
+      outputAudioPath.value = URL.createObjectURL(blob);
     } catch (e) {
       error.value = String(e);
     } finally {

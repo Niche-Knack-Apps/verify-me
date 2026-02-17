@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { ref, onMounted } from 'vue';
 import { useSettingsStore } from '@/stores/settings';
 import { useModelsStore } from '@/stores/models';
 import Button from '@/components/ui/Button.vue';
+import Toggle from '@/components/ui/Toggle.vue';
 import LoggingPanel from '@/components/settings/LoggingPanel.vue';
 import AboutPanel from '@/components/settings/AboutPanel.vue';
 
@@ -14,6 +15,7 @@ const emit = defineEmits<{
 
 const settings = useSettingsStore();
 const modelsStore = useModelsStore();
+const downloadError = ref<string | null>(null);
 
 async function openModelsDirectory() {
   try {
@@ -24,9 +26,19 @@ async function openModelsDirectory() {
   }
 }
 
+async function handleDownload(modelId: string) {
+  downloadError.value = null;
+  try {
+    await modelsStore.downloadModel(modelId, settings.hfToken || undefined);
+  } catch (e) {
+    downloadError.value = String(e);
+  }
+}
+
 onMounted(() => {
   modelsStore.loadModels();
   settings.loadModelsDirectory();
+  settings.checkEngineHealth();
 });
 </script>
 
@@ -35,15 +47,39 @@ onMounted(() => {
     <div class="modal-container">
       <!-- Header -->
       <div class="modal-header">
-        <h2 class="modal-title">&gt; SYSTEM CONFIGURATION_</h2>
-        <button class="close-btn" @click="emit('close')">[X]</button>
+        <h2 v-if="settings.isEighties" class="modal-title">&gt; SYSTEM CONFIGURATION_</h2>
+        <h2 v-else class="modal-title">Settings</h2>
+        <button class="close-btn" @click="emit('close')">
+          <template v-if="settings.isEighties">[X]</template>
+          <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
       </div>
 
       <!-- Content -->
       <div class="modal-content">
+        <!-- Appearance -->
+        <div class="config-section">
+          <h3 class="section-title">
+            {{ settings.isEighties ? '// APPEARANCE' : 'Appearance' }}
+          </h3>
+          <div class="config-items">
+            <div class="config-row">
+              <span class="config-key">
+                {{ settings.isEighties ? "80's Mode" : "80's Mode" }}
+              </span>
+              <Toggle
+                :model-value="settings.isEighties"
+                @update:model-value="settings.toggleTheme()"
+              />
+            </div>
+          </div>
+        </div>
+
         <!-- Models -->
         <div class="config-section">
-          <h3 class="section-title">// MODELS</h3>
+          <h3 class="section-title">
+            {{ settings.isEighties ? '// MODELS' : 'Models' }}
+          </h3>
           <div class="config-items">
             <div>
               <label class="config-label">Models Directory</label>
@@ -52,9 +88,31 @@ onMounted(() => {
                   {{ settings.modelsDirectory || 'Loading...' }}
                 </div>
                 <Button variant="secondary" size="sm" @click="openModelsDirectory">
-                  [OPEN]
+                  {{ settings.isEighties ? '[OPEN]' : 'Open' }}
                 </Button>
               </div>
+            </div>
+
+            <div>
+              <label class="config-label">HuggingFace Token</label>
+              <div class="hf-token-row">
+                <input
+                  :type="settings.isEighties ? 'text' : 'password'"
+                  :value="settings.hfToken"
+                  @input="settings.setHfToken(($event.target as HTMLInputElement).value)"
+                  class="hf-token-input"
+                  placeholder="hf_..."
+                />
+                <a
+                  href="https://huggingface.co/settings/tokens"
+                  target="_blank"
+                  class="action-link"
+                  title="Create a token at huggingface.co"
+                >
+                  {{ settings.isEighties ? '[?]' : 'Get token' }}
+                </a>
+              </div>
+              <p class="config-hint">Required to download Qwen 3 TTS model</p>
             </div>
 
             <div>
@@ -69,8 +127,14 @@ onMounted(() => {
                   class="model-entry"
                 >
                   <span class="model-entry-info">
-                    <span v-if="model.status === 'available'" class="status-ready">[*]</span>
-                    <span v-else class="status-missing">[ ]</span>
+                    <template v-if="settings.isEighties">
+                      <span v-if="model.status === 'available'" class="status-ready">[*]</span>
+                      <span v-else class="status-missing">[ ]</span>
+                    </template>
+                    <template v-else>
+                      <span v-if="model.status === 'available'" class="status-dot status-dot--ready" />
+                      <span v-else class="status-dot status-dot--missing" />
+                    </template>
                     <span :class="model.status === 'available' ? 'text-ready' : 'text-missing'">
                       {{ model.name }} ({{ model.size }})
                     </span>
@@ -78,46 +142,64 @@ onMounted(() => {
                   <div class="model-entry-actions">
                     <!-- Download progress -->
                     <div v-if="modelsStore.downloading === model.id" class="download-status">
-                      <span class="download-bar">
-                        {{ '\u2588'.repeat(Math.round((modelsStore.downloadProgress[model.id] ?? 0) / 5)) }}{{ '\u2591'.repeat(20 - Math.round((modelsStore.downloadProgress[model.id] ?? 0) / 5)) }}
-                      </span>
+                      <template v-if="settings.isEighties">
+                        <span class="download-bar">
+                          {{ '\u2588'.repeat(Math.round((modelsStore.downloadProgress[model.id] ?? 0) / 5)) }}{{ '\u2591'.repeat(20 - Math.round((modelsStore.downloadProgress[model.id] ?? 0) / 5)) }}
+                        </span>
+                      </template>
+                      <template v-else>
+                        <div class="download-bar-modern">
+                          <div class="download-bar-fill" :style="{ width: `${modelsStore.downloadProgress[model.id] ?? 0}%` }" />
+                        </div>
+                      </template>
                       <span class="download-pct">{{ Math.round(modelsStore.downloadProgress[model.id] ?? 0) }}%</span>
                     </div>
                     <!-- Download button -->
                     <button
                       v-else-if="model.status === 'downloadable'"
                       class="action-link"
-                      @click="modelsStore.downloadModel(model.id)"
+                      @click="handleDownload(model.id)"
                     >
-                      [GET]
+                      {{ settings.isEighties ? '[GET]' : 'Download' }}
                     </button>
                     <!-- Delete button -->
                     <button
-                      v-else-if="model.status === 'available' && model.downloadUrl"
+                      v-else-if="model.status === 'available' && (model.downloadUrl || model.hfRepo)"
                       class="action-link action-link--danger"
                       @click="modelsStore.deleteModel(model.id)"
                     >
-                      [DEL]
+                      {{ settings.isEighties ? '[DEL]' : 'Delete' }}
                     </button>
                   </div>
                 </div>
               </div>
             </div>
+
+            <p v-if="downloadError" class="download-error">
+              {{ settings.isEighties ? `ERROR: ${downloadError}` : downloadError }}
+            </p>
           </div>
         </div>
 
         <!-- Engine -->
         <div class="config-section">
-          <h3 class="section-title">// ENGINE</h3>
+          <h3 class="section-title">
+            {{ settings.isEighties ? '// ENGINE' : 'Engine' }}
+          </h3>
           <div class="config-items">
             <div class="config-row">
               <span class="config-key">Device</span>
-              <span class="config-value">{{ settings.deviceType.toUpperCase() }}</span>
+              <span class="config-value">
+                {{ settings.isEighties ? settings.deviceType.toUpperCase() : settings.deviceType }}
+              </span>
             </div>
             <div class="config-row">
               <span class="config-key">Status</span>
               <span :class="settings.engineRunning ? 'config-value--ok' : 'config-value--off'">
-                {{ settings.engineRunning ? 'RUNNING' : 'STOPPED' }}
+                {{ settings.isEighties
+                  ? (settings.engineRunning ? 'RUNNING' : 'STOPPED')
+                  : (settings.engineRunning ? 'Running' : 'Stopped')
+                }}
               </span>
             </div>
           </div>
@@ -125,13 +207,17 @@ onMounted(() => {
 
         <!-- Logging -->
         <div class="config-section">
-          <h3 class="section-title">// LOGGING</h3>
+          <h3 class="section-title">
+            {{ settings.isEighties ? '// LOGGING' : 'Logging' }}
+          </h3>
           <LoggingPanel />
         </div>
 
         <!-- About -->
         <div class="config-section">
-          <h3 class="section-title">// ABOUT</h3>
+          <h3 class="section-title">
+            {{ settings.isEighties ? '// ABOUT' : 'About' }}
+          </h3>
           <AboutPanel
             app-name="Verify Me"
             :app-version="APP_VERSION"
@@ -142,7 +228,7 @@ onMounted(() => {
       <!-- Footer -->
       <div class="modal-footer">
         <Button variant="primary" size="sm" @click="emit('close')">
-          [DONE]
+          {{ settings.isEighties ? '[DONE]' : 'Done' }}
         </Button>
       </div>
     </div>
@@ -153,24 +239,35 @@ onMounted(() => {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--app-overlay-bg);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 50;
   padding: 1rem;
+  backdrop-filter: blur(4px);
+}
+
+[data-theme="eighties"] .modal-overlay {
+  backdrop-filter: none;
 }
 
 .modal-container {
-  background: var(--crt-bg);
-  border: 1px solid var(--crt-bright);
-  border-radius: 0;
-  box-shadow: 0 0 20px rgba(51, 255, 0, 0.15);
+  background: var(--app-bg);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
   width: 100%;
   max-width: 28rem;
   max-height: 90vh;
   display: flex;
   flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="eighties"] .modal-container {
+  border-color: var(--app-accent);
+  border-radius: 0;
+  box-shadow: 0 0 20px rgba(51, 255, 0, 0.15);
 }
 
 .modal-header {
@@ -178,13 +275,19 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   padding: 0.75rem 1rem;
-  border-bottom: 1px solid var(--crt-border);
+  border-bottom: 1px solid var(--app-border);
 }
 
 .modal-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+[data-theme="eighties"] .modal-title {
   font-size: 20px;
   font-weight: 400;
-  color: var(--crt-bright);
+  color: var(--app-accent);
   text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
 }
 
@@ -195,17 +298,26 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   background: transparent;
-  color: var(--crt-dim);
-  border: 1px solid var(--crt-border);
-  border-radius: 0;
+  color: var(--app-muted);
+  border: 1px solid transparent;
+  border-radius: var(--app-radius);
   cursor: pointer;
-  font-family: 'VT323', monospace;
-  font-size: 18px;
-  transition: color 0.15s, border-color 0.15s;
+  font-family: var(--app-font);
+  font-size: inherit;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
 .close-btn:hover {
-  color: var(--crt-error);
-  border-color: var(--crt-error);
+  color: var(--app-error);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+[data-theme="eighties"] .close-btn {
+  border: 1px solid var(--app-border);
+  border-radius: 0;
+}
+[data-theme="eighties"] .close-btn:hover {
+  background: transparent;
+  border-color: var(--app-error);
 }
 
 .modal-content {
@@ -222,11 +334,18 @@ onMounted(() => {
 }
 
 .section-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--app-muted);
+  margin-bottom: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+[data-theme="eighties"] .section-title {
   font-size: 16px;
   font-weight: 400;
-  color: var(--crt-dim);
-  margin-bottom: 0.75rem;
-  letter-spacing: 0.05em;
+  text-transform: none;
 }
 
 .config-items {
@@ -237,9 +356,13 @@ onMounted(() => {
 
 .config-label {
   display: block;
-  font-size: 14px;
-  color: var(--crt-dim);
+  font-size: 0.8125rem;
+  color: var(--app-muted);
   margin-bottom: 0.25rem;
+}
+
+[data-theme="eighties"] .config-label {
+  font-size: 14px;
 }
 
 .dir-row {
@@ -250,10 +373,11 @@ onMounted(() => {
 .dir-display {
   flex: 1;
   padding: 0.25rem 0.5rem;
-  font-size: 16px;
-  background: var(--crt-surface);
-  border: 1px solid var(--crt-border);
-  color: var(--crt-dim);
+  font-size: 0.8125rem;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+  color: var(--app-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -261,10 +385,19 @@ onMounted(() => {
   align-items: center;
 }
 
+[data-theme="eighties"] .dir-display {
+  font-size: 16px;
+  border-radius: 0;
+}
+
 .empty-text {
-  font-size: 14px;
-  color: var(--crt-dim);
+  font-size: 0.8125rem;
+  color: var(--app-muted);
   font-style: italic;
+}
+
+[data-theme="eighties"] .empty-text {
+  font-size: 14px;
 }
 
 .model-list {
@@ -280,9 +413,15 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   padding: 0.375rem 0.5rem;
-  background: var(--crt-surface);
-  border: 1px solid var(--crt-border);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+  font-size: 0.875rem;
+}
+
+[data-theme="eighties"] .model-entry {
   font-size: 16px;
+  border-radius: 0;
 }
 
 .model-entry-info {
@@ -292,17 +431,30 @@ onMounted(() => {
 }
 
 .status-ready {
-  color: var(--crt-bright);
+  color: var(--app-accent);
 }
 .status-missing {
-  color: var(--crt-dim);
+  color: var(--app-muted);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot--ready {
+  background: var(--app-success);
+}
+.status-dot--missing {
+  background: var(--app-muted);
 }
 
 .text-ready {
-  color: var(--crt-text);
+  color: var(--app-text);
 }
 .text-missing {
-  color: var(--crt-dim);
+  color: var(--app-muted);
 }
 
 .model-entry-actions {
@@ -319,34 +471,65 @@ onMounted(() => {
 
 .download-bar {
   font-size: 12px;
-  color: var(--crt-text);
+  color: var(--app-text);
   text-shadow: none;
   letter-spacing: 0;
 }
 
+.download-bar-modern {
+  width: 60px;
+  height: 4px;
+  background: var(--app-border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.download-bar-fill {
+  height: 100%;
+  background: var(--app-accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
 .download-pct {
+  font-size: 0.75rem;
+  color: var(--app-muted);
+}
+
+[data-theme="eighties"] .download-pct {
   font-size: 14px;
-  color: var(--crt-dim);
 }
 
 .action-link {
-  font-family: 'VT323', monospace;
-  font-size: 16px;
+  font-family: var(--app-font);
+  font-size: 0.8125rem;
   background: transparent;
-  color: var(--crt-bright);
+  color: var(--app-accent);
   border: none;
   cursor: pointer;
   padding: 0;
-  transition: text-shadow 0.15s;
+  transition: opacity 0.15s;
 }
 .action-link:hover {
-  text-shadow: 0 0 6px rgba(51, 255, 0, 0.5);
+  opacity: 0.8;
 }
+
+[data-theme="eighties"] .action-link {
+  font-size: 16px;
+}
+[data-theme="eighties"] .action-link:hover {
+  text-shadow: 0 0 6px rgba(51, 255, 0, 0.5);
+  opacity: 1;
+}
+
 .action-link--danger {
-  color: var(--crt-dim);
+  color: var(--app-muted);
 }
 .action-link--danger:hover {
-  color: var(--crt-error);
+  color: var(--app-error);
+}
+
+[data-theme="eighties"] .action-link--danger:hover {
   text-shadow: 0 0 6px rgba(255, 51, 51, 0.4);
 }
 
@@ -354,29 +537,94 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  font-size: 0.875rem;
+}
+
+[data-theme="eighties"] .config-row {
   font-size: 16px;
 }
 
 .config-key {
-  color: var(--crt-dim);
+  color: var(--app-muted);
 }
 
 .config-value {
-  color: var(--crt-text);
+  color: var(--app-text);
 }
 
 .config-value--ok {
-  color: var(--crt-bright);
+  color: var(--app-success);
+}
+
+[data-theme="eighties"] .config-value--ok {
   text-shadow: 0 0 6px rgba(51, 255, 0, 0.4);
 }
+
 .config-value--off {
-  color: var(--crt-dim);
+  color: var(--app-muted);
+}
+
+.hf-token-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.hf-token-input {
+  flex: 1;
+  padding: 0.375rem 0.5rem;
+  min-height: 36px;
+  font-family: var(--app-font);
+  font-size: 0.8125rem;
+  background: var(--app-bg);
+  color: var(--app-text);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+  caret-color: var(--app-accent);
+}
+.hf-token-input:focus {
+  outline: none;
+  border-color: var(--app-accent);
+  box-shadow: var(--app-focus-ring);
+}
+.hf-token-input::placeholder {
+  color: var(--app-muted);
+}
+
+[data-theme="eighties"] .hf-token-input {
+  font-size: 16px;
+  border-radius: 0;
+  text-shadow: var(--app-glow);
+}
+
+.config-hint {
+  font-size: 0.6875rem;
+  color: var(--app-muted);
+  margin-top: 0.25rem;
+}
+
+[data-theme="eighties"] .config-hint {
+  font-size: 12px;
+}
+
+.download-error {
+  font-size: 0.8125rem;
+  color: var(--app-error);
+  padding: 0.375rem 0.5rem;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: var(--app-radius);
+}
+
+[data-theme="eighties"] .download-error {
+  font-size: 14px;
+  border-radius: 0;
 }
 
 .modal-footer {
   display: flex;
   justify-content: flex-end;
   padding: 0.75rem 1rem;
-  border-top: 1px solid var(--crt-border);
+  border-top: 1px solid var(--app-border);
 }
 </style>

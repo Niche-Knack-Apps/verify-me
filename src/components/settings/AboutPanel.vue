@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
+import { useSettingsStore } from '@/stores/settings';
 
 // V4V Configuration
 const config = {
@@ -14,6 +15,7 @@ const config = {
       label: 'Bitcoin Lightning',
       description: 'Instant, low-fee payments',
       icon: 'ZAP',
+      iconEmoji: '\u26A1',
       address: 'itsmikenichols@getalby.com',
       enabled: true,
     },
@@ -21,6 +23,7 @@ const config = {
       label: 'Bitcoin On-chain',
       description: 'For larger contributions',
       icon: 'BTC',
+      iconEmoji: '\u20BF',
       address: '',
       enabled: false,
     },
@@ -28,6 +31,7 @@ const config = {
       label: 'Ko-fi',
       description: 'Buy us a coffee',
       icon: 'KFI',
+      iconEmoji: '\u2615',
       url: 'https://ko-fi.com/nicheknack',
       enabled: true,
     },
@@ -35,6 +39,7 @@ const config = {
       label: 'PayPal',
       description: 'Traditional payment',
       icon: 'PAY',
+      iconEmoji: '\uD83D\uDCB3',
       url: 'https://paypal.me/itsmikenichols',
       enabled: true,
     },
@@ -46,6 +51,7 @@ const props = defineProps<{
   appVersion: string;
 }>();
 
+const settings = useSettingsStore();
 const copiedKey = ref<string | null>(null);
 
 interface V4VOption {
@@ -53,6 +59,7 @@ interface V4VOption {
   label: string;
   description: string;
   icon: string;
+  iconEmoji: string;
   address?: string;
   url?: string;
   enabled: boolean;
@@ -86,8 +93,9 @@ function openExternal(url: string) {
     <!-- Header -->
     <div class="about-header">
       <img src="@/assets/niche-knack-logo.png" alt="niche-knack apps" class="about-logo" />
-      <div class="about-title">&gt; {{ appName.toUpperCase() }}</div>
-      <div class="about-version">v{{ appVersion }}</div>
+      <div v-if="settings.isEighties" class="about-title">&gt; {{ props.appName.toUpperCase() }}</div>
+      <div v-else class="about-title">{{ props.appName }}</div>
+      <div class="about-version">v{{ props.appVersion }}</div>
       <div class="about-org">
         <p>Part of <strong>niche-knack apps</strong></p>
         <a :href="config.brand.website" target="_blank" rel="noopener">nicheknack.app</a>
@@ -96,7 +104,9 @@ function openExternal(url: string) {
 
     <!-- Value for Value -->
     <div class="v4v-section">
-      <h4 class="v4v-heading">// SUPPORT DEVELOPMENT</h4>
+      <h4 class="v4v-heading">
+        {{ settings.isEighties ? '// SUPPORT DEVELOPMENT' : 'Support Development' }}
+      </h4>
       <p class="v4v-description">
         This app is free, built on the
         <a href="https://value4value.info/" target="_blank" rel="noopener">Value for Value</a> model.
@@ -111,7 +121,8 @@ function openExternal(url: string) {
           class="donation-option"
         >
           <div class="donation-info">
-            <span class="donation-icon">[{{ option.icon }}]</span>
+            <span v-if="settings.isEighties" class="donation-icon">[{{ option.icon }}]</span>
+            <span v-else class="donation-icon donation-icon--modern">{{ option.iconEmoji }}</span>
             <div class="donation-details">
               <strong>{{ option.label }}</strong>
               <small>{{ option.address || option.description }}</small>
@@ -124,14 +135,17 @@ function openExternal(url: string) {
               :class="{ 'action-btn--copied': copiedKey === option.key }"
               @click="copyToClipboard(option.address!, option.key)"
             >
-              {{ copiedKey === option.key ? '[OK!]' : '[CPY]' }}
+              {{ copiedKey === option.key
+                ? (settings.isEighties ? '[OK!]' : 'Copied!')
+                : (settings.isEighties ? '[CPY]' : 'Copy')
+              }}
             </button>
             <button
               v-else-if="option.url"
               class="action-btn"
               @click="openExternal(option.url!)"
             >
-              [GO]
+              {{ settings.isEighties ? '[GO]' : 'Open' }}
             </button>
           </div>
         </div>
@@ -169,53 +183,78 @@ function openExternal(url: string) {
   width: 64px;
   height: 64px;
   margin: 0 auto 0.75rem;
-  border-radius: 0;
-  border: 1px solid var(--crt-border);
+  border-radius: var(--app-radius);
+  border: 1px solid var(--app-border);
 }
 
 .about-title {
-  font-size: 22px;
-  color: var(--crt-bright);
-  text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--app-accent);
   margin-bottom: 0.25rem;
 }
 
+[data-theme="eighties"] .about-title {
+  font-size: 22px;
+  font-weight: 400;
+  text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
+}
+
 .about-version {
+  font-size: 0.875rem;
+  color: var(--app-muted);
+}
+
+[data-theme="eighties"] .about-version {
   font-size: 16px;
-  color: var(--crt-dim);
 }
 
 .about-org {
   margin-top: 0.5rem;
+  font-size: 0.875rem;
+  color: var(--app-muted);
+}
+
+[data-theme="eighties"] .about-org {
   font-size: 16px;
-  color: var(--crt-dim);
 }
 
 .about-org a {
-  color: var(--crt-bright);
+  color: var(--app-accent);
 }
 
 .v4v-section {
   padding-top: 1rem;
-  border-top: 1px solid var(--crt-border);
+  border-top: 1px solid var(--app-border);
 }
 
 .v4v-heading {
-  font-size: 16px;
-  font-weight: 400;
-  color: var(--crt-dim);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--app-muted);
   margin-bottom: 0.5rem;
+  text-transform: uppercase;
   letter-spacing: 0.05em;
 }
 
-.v4v-description {
+[data-theme="eighties"] .v4v-heading {
   font-size: 16px;
-  color: var(--crt-dim);
+  font-weight: 400;
+  text-transform: none;
+}
+
+.v4v-description {
+  font-size: 0.875rem;
+  color: var(--app-muted);
   margin-bottom: 1rem;
 }
 
+[data-theme="eighties"] .v4v-description {
+  font-size: 16px;
+}
+
 .v4v-description a {
-  color: var(--crt-bright);
+  color: var(--app-accent);
 }
 
 .donation-options {
@@ -229,8 +268,12 @@ function openExternal(url: string) {
   align-items: center;
   justify-content: space-between;
   padding: 0.75rem;
-  background: var(--crt-surface);
-  border: 1px solid var(--crt-border);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+}
+
+[data-theme="eighties"] .donation-option {
   border-radius: 0;
 }
 
@@ -243,9 +286,17 @@ function openExternal(url: string) {
 }
 
 .donation-icon {
-  font-size: 16px;
-  color: var(--crt-bright);
+  font-size: 0.875rem;
+  color: var(--app-accent);
   flex-shrink: 0;
+}
+
+[data-theme="eighties"] .donation-icon {
+  font-size: 16px;
+}
+
+.donation-icon--modern {
+  font-size: 1.25rem;
 }
 
 .donation-details {
@@ -255,60 +306,83 @@ function openExternal(url: string) {
 
 .donation-details strong {
   display: block;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--app-text);
+}
+
+[data-theme="eighties"] .donation-details strong {
   font-size: 16px;
   font-weight: 400;
-  color: var(--crt-text);
 }
 
 .donation-details small {
   display: block;
-  font-size: 14px;
-  color: var(--crt-dim);
+  font-size: 0.75rem;
+  color: var(--app-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+[data-theme="eighties"] .donation-details small {
+  font-size: 14px;
+}
+
 .action-btn {
-  font-family: 'VT323', monospace;
-  font-size: 16px;
+  font-family: var(--app-font);
+  font-size: 0.8125rem;
   padding: 0.25rem 0.5rem;
-  border: 1px solid var(--crt-border);
-  border-radius: 0;
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
   background: transparent;
-  color: var(--crt-text);
+  color: var(--app-text);
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
 
 .action-btn:hover {
-  color: var(--crt-bright);
-  border-color: var(--crt-bright);
+  color: var(--app-accent);
+  border-color: var(--app-accent);
+  background: var(--app-accent-hover-bg);
+}
+
+[data-theme="eighties"] .action-btn {
+  font-size: 16px;
+  border-radius: 0;
+}
+[data-theme="eighties"] .action-btn:hover {
+  background: transparent;
   text-shadow: 0 0 6px rgba(51, 255, 0, 0.4);
 }
 
 .action-btn--copied {
-  color: var(--crt-bright);
-  border-color: var(--crt-bright);
+  color: var(--app-accent);
+  border-color: var(--app-accent);
 }
 
 .other-ways {
   margin-top: 1rem;
   padding: 0.75rem;
-  background: var(--crt-surface);
-  border: 1px solid var(--crt-border);
-  border-radius: 0;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+  font-size: 0.875rem;
+}
+
+[data-theme="eighties"] .other-ways {
   font-size: 16px;
+  border-radius: 0;
 }
 
 .other-ways strong {
   display: block;
-  color: var(--crt-text);
+  color: var(--app-text);
   margin-bottom: 0.5rem;
 }
 
 .help-list {
-  color: var(--crt-dim);
+  color: var(--app-muted);
 }
 
 .help-list div {
@@ -316,17 +390,21 @@ function openExternal(url: string) {
 }
 
 .help-list a {
-  color: var(--crt-bright);
+  color: var(--app-accent);
 }
 
 .about-footer {
   margin-top: 1rem;
   text-align: center;
+  font-size: 0.8125rem;
+  color: var(--app-muted);
+}
+
+[data-theme="eighties"] .about-footer {
   font-size: 14px;
-  color: var(--crt-dim);
 }
 
 .about-footer a {
-  color: var(--crt-bright);
+  color: var(--app-accent);
 }
 </style>

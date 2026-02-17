@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { getLogger, type LogStats, type LogEntry } from '@/services/debug-logger';
+import { useSettingsStore } from '@/stores/settings';
 import Button from '@/components/ui/Button.vue';
 
+const settings = useSettingsStore();
 const stats = ref<LogStats | null>(null);
 const recentLogs = ref<LogEntry[]>([]);
 const loading = ref(false);
@@ -95,7 +97,7 @@ function formatSize(bytes: number): string {
 }
 
 function getLevelTag(level: string): string {
-  return `[${level.toUpperCase()}]`;
+  return settings.isEighties ? `[${level.toUpperCase()}]` : level.toUpperCase();
 }
 
 function getLevelClass(level: string): string {
@@ -122,61 +124,73 @@ onUnmounted(() => {
   <div class="logging-panel">
     <!-- Stats -->
     <div v-if="stats" class="stats-row">
-      <span class="stat">ENTRIES: <span class="stat-val">{{ stats.totalCount }}</span></span>
-      <span class="stat">SESSIONS: <span class="stat-val">{{ stats.sessionCount }}</span></span>
-      <span class="stat">SIZE: <span class="stat-val">{{ formatSize(stats.estimatedSize) }}</span></span>
+      <span class="stat">
+        {{ settings.isEighties ? 'ENTRIES:' : 'Entries:' }}
+        <span class="stat-val">{{ stats.totalCount }}</span>
+      </span>
+      <span class="stat">
+        {{ settings.isEighties ? 'SESSIONS:' : 'Sessions:' }}
+        <span class="stat-val">{{ stats.sessionCount }}</span>
+      </span>
+      <span class="stat">
+        {{ settings.isEighties ? 'SIZE:' : 'Size:' }}
+        <span class="stat-val">{{ formatSize(stats.estimatedSize) }}</span>
+      </span>
     </div>
 
     <!-- Level breakdown -->
     <div v-if="stats" class="level-breakdown">
-      <span class="level-tag log-info">INFO:{{ stats.byLevel.info }}</span>
-      <span class="level-tag log-warn">WARN:{{ stats.byLevel.warn }}</span>
-      <span class="level-tag log-error">ERR:{{ stats.byLevel.error }}</span>
-      <span class="level-tag log-debug">DBG:{{ stats.byLevel.debug }}</span>
+      <span class="level-tag log-info">{{ settings.isEighties ? 'INFO' : 'Info' }}:{{ stats.byLevel.info }}</span>
+      <span class="level-tag log-warn">{{ settings.isEighties ? 'WARN' : 'Warn' }}:{{ stats.byLevel.warn }}</span>
+      <span class="level-tag log-error">{{ settings.isEighties ? 'ERR' : 'Err' }}:{{ stats.byLevel.error }}</span>
+      <span class="level-tag log-debug">{{ settings.isEighties ? 'DBG' : 'Debug' }}:{{ stats.byLevel.debug }}</span>
     </div>
 
     <!-- Actions -->
     <div class="actions">
       <Button variant="secondary" size="sm" :disabled="downloading" @click="handleDownload">
-        {{ downloading ? '[...]' : '[EXPORT]' }}
+        {{ downloading ? '...' : (settings.isEighties ? '[EXPORT]' : 'Export') }}
       </Button>
       <Button variant="ghost" size="sm" :disabled="clearing" @click="handleClear">
-        {{ clearing ? '[...]' : '[CLEAR]' }}
+        {{ clearing ? '...' : (settings.isEighties ? '[CLEAR]' : 'Clear') }}
       </Button>
       <Button
         variant="ghost"
         size="sm"
         @click="toggleAutoRefresh"
       >
-        {{ autoRefresh ? '[AUTO:ON]' : '[AUTO:OFF]' }}
+        {{ settings.isEighties
+          ? (autoRefresh ? '[AUTO:ON]' : '[AUTO:OFF]')
+          : (autoRefresh ? 'Auto: On' : 'Auto: Off')
+        }}
       </Button>
     </div>
 
     <!-- Download result feedback -->
     <div v-if="downloadResult" class="feedback" :class="downloadResult.success ? 'feedback--ok' : 'feedback--err'">
       <span v-if="downloadResult.success">Saved: {{ downloadResult.filename }}</span>
-      <span v-else>ERROR: {{ downloadResult.error }}</span>
+      <span v-else>{{ settings.isEighties ? 'ERROR:' : 'Error:' }} {{ downloadResult.error }}</span>
     </div>
 
     <!-- Filter -->
     <div class="filter-row">
-      <span class="filter-label">FILTER:</span>
+      <span class="filter-label">{{ settings.isEighties ? 'FILTER:' : 'Filter:' }}</span>
       <select v-model="filterLevel" class="filter-select">
-        <option value="all">ALL</option>
-        <option value="info">INFO</option>
-        <option value="warn">WARN</option>
-        <option value="error">ERROR</option>
-        <option value="debug">DEBUG</option>
+        <option value="all">{{ settings.isEighties ? 'ALL' : 'All' }}</option>
+        <option value="info">{{ settings.isEighties ? 'INFO' : 'Info' }}</option>
+        <option value="warn">{{ settings.isEighties ? 'WARN' : 'Warn' }}</option>
+        <option value="error">{{ settings.isEighties ? 'ERROR' : 'Error' }}</option>
+        <option value="debug">{{ settings.isEighties ? 'DEBUG' : 'Debug' }}</option>
       </select>
       <button class="refresh-btn" @click="loadData" :disabled="loading">
-        {{ loading ? '[...]' : '[REF]' }}
+        {{ loading ? '...' : (settings.isEighties ? '[REF]' : 'Refresh') }}
       </button>
     </div>
 
     <!-- Recent logs -->
     <div class="logs-container">
       <div v-if="filteredLogs.length === 0" class="no-logs">
-        -- NO LOGS --
+        {{ settings.isEighties ? '-- NO LOGS --' : 'No logs yet' }}
       </div>
       <div
         v-for="(log, index) in filteredLogs"
@@ -201,12 +215,16 @@ onUnmounted(() => {
   gap: 1rem;
   flex-wrap: wrap;
   margin-bottom: 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--app-muted);
+}
+
+[data-theme="eighties"] .stats-row {
   font-size: 14px;
-  color: var(--crt-dim);
 }
 
 .stat-val {
-  color: var(--crt-bright);
+  color: var(--app-accent);
 }
 
 .level-breakdown {
@@ -214,6 +232,10 @@ onUnmounted(() => {
   gap: 0.75rem;
   flex-wrap: wrap;
   margin-bottom: 0.75rem;
+  font-size: 0.8125rem;
+}
+
+[data-theme="eighties"] .level-breakdown {
   font-size: 14px;
 }
 
@@ -221,10 +243,10 @@ onUnmounted(() => {
   letter-spacing: 0.05em;
 }
 
-.log-info { color: var(--crt-text); }
-.log-warn { color: var(--crt-warn); }
-.log-error { color: var(--crt-error); }
-.log-debug { color: var(--crt-dim); }
+.log-info { color: var(--app-text); }
+.log-warn { color: var(--app-warn); }
+.log-error { color: var(--app-error); }
+.log-debug { color: var(--app-muted); }
 
 .actions {
   display: flex;
@@ -234,22 +256,37 @@ onUnmounted(() => {
 }
 
 .feedback {
-  font-size: 14px;
+  font-size: 0.8125rem;
   padding: 0.375rem 0.5rem;
   margin-bottom: 0.5rem;
   word-break: break-all;
+  border-radius: var(--app-radius);
+}
+
+[data-theme="eighties"] .feedback {
+  font-size: 14px;
+  border-radius: 0;
 }
 
 .feedback--ok {
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid var(--app-border);
+  color: var(--app-text);
+}
+
+[data-theme="eighties"] .feedback--ok {
   background: rgba(51, 255, 0, 0.05);
-  border: 1px solid var(--crt-border);
-  color: var(--crt-text);
 }
 
 .feedback--err {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--app-error);
+}
+
+[data-theme="eighties"] .feedback--err {
   background: rgba(255, 51, 51, 0.05);
-  border: 1px solid rgba(255, 51, 51, 0.3);
-  color: var(--crt-error);
+  border-color: rgba(255, 51, 51, 0.3);
 }
 
 .filter-row {
@@ -260,63 +297,83 @@ onUnmounted(() => {
 }
 
 .filter-label {
+  font-size: 0.8125rem;
+  color: var(--app-muted);
+}
+
+[data-theme="eighties"] .filter-label {
   font-size: 14px;
-  color: var(--crt-dim);
 }
 
 .filter-select {
   flex: 1;
   height: 28px;
   padding: 0 0.5rem;
+  font-size: 0.8125rem;
+  font-family: var(--app-font);
+  background: var(--app-bg);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+  color: var(--app-text);
+}
+
+[data-theme="eighties"] .filter-select {
   font-size: 16px;
-  font-family: 'VT323', monospace;
-  background: var(--crt-bg);
-  border: 1px solid var(--crt-border);
   border-radius: 0;
-  color: var(--crt-text);
 }
 
 .refresh-btn {
   height: 28px;
   padding: 0 0.5rem;
-  font-family: 'VT323', monospace;
-  font-size: 16px;
+  font-family: var(--app-font);
+  font-size: 0.8125rem;
   background: transparent;
-  border: 1px solid var(--crt-border);
-  border-radius: 0;
-  color: var(--crt-dim);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+  color: var(--app-muted);
   cursor: pointer;
   transition: color 0.15s, border-color 0.15s;
 }
 .refresh-btn:hover:not(:disabled) {
-  border-color: var(--crt-text);
-  color: var(--crt-text);
+  border-color: var(--app-accent);
+  color: var(--app-accent);
 }
 .refresh-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
 
+[data-theme="eighties"] .refresh-btn {
+  font-size: 16px;
+  border-radius: 0;
+}
+
 .logs-container {
   max-height: 200px;
   overflow-y: auto;
-  background: var(--crt-surface);
-  border: 1px solid var(--crt-border);
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
   padding: 0.5rem;
+  font-size: 0.75rem;
+}
+
+[data-theme="eighties"] .logs-container {
   font-size: 14px;
+  border-radius: 0;
 }
 
 .no-logs {
   text-align: center;
   padding: 1rem;
-  color: var(--crt-dim);
+  color: var(--app-muted);
 }
 
 .log-entry {
   display: flex;
   gap: 0.5rem;
   padding: 0.125rem 0;
-  border-bottom: 1px solid rgba(26, 58, 26, 0.5);
+  border-bottom: 1px solid var(--app-border);
 }
 
 .log-entry:last-child {
@@ -324,7 +381,7 @@ onUnmounted(() => {
 }
 
 .log-time {
-  color: var(--crt-dim);
+  color: var(--app-muted);
   flex-shrink: 0;
 }
 
@@ -338,6 +395,6 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--crt-text);
+  color: var(--app-text);
 }
 </style>

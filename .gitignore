@@ -6,6 +6,8 @@ android/.gradle/
 engine/__pycache__/
 engine/.venv/
 *.pyc
+src-tauri/resources/models/pocket-tts/
+src-tauri/resources/models/*.safetensors
 .env
 .DS_Store
 *.log

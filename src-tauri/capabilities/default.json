@@ -9,6 +9,7 @@
     "dialog:default",
     "shell:default",
     "fs:default",
+    "fs:allow-read-file",
     "fs:allow-write-file",
     "fs:allow-mkdir",
     "fs:scope-appdata-recursive"

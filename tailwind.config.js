@@ -6,19 +6,23 @@ export default {
   theme: {
     extend: {
       colors: {
-        crt: {
-          bg: '#0a0a0a',
-          surface: '#0f1a0f',
-          text: '#20c20e',
-          bright: '#33ff00',
-          dim: '#0a8a0a',
-          border: '#1a3a1a',
-          error: '#ff3333',
-          warn: '#cccc00',
+        app: {
+          bg: 'var(--app-bg)',
+          surface: 'var(--app-surface)',
+          text: 'var(--app-text)',
+          accent: 'var(--app-accent)',
+          muted: 'var(--app-muted)',
+          border: 'var(--app-border)',
+          error: 'var(--app-error)',
+          warn: 'var(--app-warn)',
+          success: 'var(--app-success)',
         },
       },
       fontFamily: {
-        terminal: ["'VT323'", 'monospace'],
+        app: ['var(--app-font)'],
+      },
+      borderRadius: {
+        app: 'var(--app-radius)',
       },
     },
   },

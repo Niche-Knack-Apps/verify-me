@@ -1,19 +1,29 @@
 <script setup lang="ts">
+import { onMounted } from 'vue';
 import { useSettingsStore } from '@/stores/settings';
+import { useModelsStore } from '@/stores/models';
 import TTSTab from '@/components/TTSTab.vue';
 import VoiceCloneTab from '@/components/VoiceCloneTab.vue';
 import SettingsModal from '@/components/settings/SettingsModal.vue';
 
 const settings = useSettingsStore();
+const modelsStore = useModelsStore();
+
+onMounted(async () => {
+  await settings.initEngine();
+  await modelsStore.loadModels();
+});
 </script>
 
 <template>
   <div class="app-container">
     <!-- Header -->
     <header class="app-header">
-      <h1 class="app-title">&gt; VERIFY ME_</h1>
+      <h1 v-if="settings.isEighties" class="app-title">&gt; VERIFY ME_</h1>
+      <h1 v-else class="app-title">"My voice is my passport. Verify me."</h1>
       <button class="settings-btn" @click="settings.showSettings = true" title="Settings">
-        [CFG]
+        <template v-if="settings.isEighties">[CFG]</template>
+        <svg v-else xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
       </button>
     </header>
 
@@ -24,14 +34,16 @@ const settings = useSettingsStore();
         :class="{ active: settings.activeTab === 'tts' }"
         @click="settings.activeTab = 'tts'"
       >
-        {{ settings.activeTab === 'tts' ? '[*]' : '[ ]' }} TEXT-TO-SPEECH
+        <template v-if="settings.isEighties">{{ settings.activeTab === 'tts' ? '[*]' : '[ ]' }} TEXT-TO-SPEECH</template>
+        <template v-else>Text to Speech</template>
       </button>
       <button
         class="tab-btn"
         :class="{ active: settings.activeTab === 'clone' }"
         @click="settings.activeTab = 'clone'"
       >
-        {{ settings.activeTab === 'clone' ? '[*]' : '[ ]' }} VOICE CLONE
+        <template v-if="settings.isEighties">{{ settings.activeTab === 'clone' ? '[*]' : '[ ]' }} VOICE CLONE</template>
+        <template v-else>Voice Clone</template>
       </button>
     </nav>
 
@@ -44,9 +56,16 @@ const settings = useSettingsStore();
     <!-- Footer -->
     <footer class="app-footer">
       <span class="engine-status">
-        <span class="status-indicator">{{ settings.engineRunning ? '[ONLINE]' : '[OFFLINE]' }}</span>
-        ENGINE: {{ settings.engineRunning ? 'RUNNING' : 'STOPPED' }}
-        // {{ settings.deviceType.toUpperCase() }}
+        <template v-if="settings.isEighties">
+          <span class="status-indicator">{{ settings.engineRunning ? '[ONLINE]' : '[OFFLINE]' }}</span>
+          ENGINE: {{ settings.engineRunning ? 'RUNNING' : 'STOPPED' }}
+          // {{ settings.deviceType.toUpperCase() }}
+        </template>
+        <template v-else>
+          <span class="status-dot" :class="settings.engineRunning ? 'status-dot--on' : 'status-dot--off'" />
+          Engine: {{ settings.engineRunning ? 'Running' : 'Stopped' }}
+          <span class="device-badge">({{ settings.deviceType }})</span>
+        </template>
       </span>
     </footer>
 
@@ -68,15 +87,21 @@ const settings = useSettingsStore();
   align-items: center;
   justify-content: space-between;
   padding: 0.75rem 1rem;
-  border-bottom: 1px solid var(--crt-border);
+  border-bottom: 1px solid var(--app-border);
   flex-shrink: 0;
 }
 
 .app-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--app-accent);
+  margin: 0;
+  font-style: italic;
+}
+
+[data-theme="eighties"] .app-title {
   font-size: 1.5rem;
   font-weight: 400;
-  color: var(--crt-bright);
-  margin: 0;
   text-shadow: 0 0 8px rgba(51, 255, 0, 0.6), 0 0 16px rgba(51, 255, 0, 0.3);
   letter-spacing: 0.1em;
 }
@@ -88,23 +113,33 @@ const settings = useSettingsStore();
   align-items: center;
   justify-content: center;
   background: transparent;
-  color: var(--crt-dim);
-  border: 1px solid var(--crt-border);
-  border-radius: 0;
+  color: var(--app-muted);
+  border: 1px solid transparent;
+  border-radius: var(--app-radius);
   cursor: pointer;
-  font-family: 'VT323', monospace;
-  font-size: 18px;
-  transition: color 0.15s, border-color 0.15s;
+  font-family: var(--app-font);
+  font-size: inherit;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
 .settings-btn:hover {
-  color: var(--crt-bright);
-  border-color: var(--crt-bright);
+  color: var(--app-accent);
+  background: var(--app-accent-hover-bg);
+}
+
+[data-theme="eighties"] .settings-btn {
+  border: 1px solid var(--app-border);
+  border-radius: 0;
+}
+[data-theme="eighties"] .settings-btn:hover {
+  color: var(--app-accent);
+  border-color: var(--app-accent);
+  background: transparent;
   text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
 }
 
 .tab-bar {
   display: flex;
-  border-bottom: 1px solid var(--crt-border);
+  border-bottom: 1px solid var(--app-border);
   flex-shrink: 0;
 }
 
@@ -112,25 +147,34 @@ const settings = useSettingsStore();
   flex: 1;
   min-height: 44px;
   padding: 0.625rem 1rem;
-  font-family: 'VT323', monospace;
-  font-size: 18px;
+  font-family: var(--app-font);
+  font-size: inherit;
+  font-weight: 500;
   background: transparent;
-  color: var(--crt-dim);
+  color: var(--app-muted);
   border: none;
   border-bottom: 2px solid transparent;
   border-radius: 0;
   cursor: pointer;
   transition: color 0.15s, border-color 0.15s;
+}
+.tab-btn:hover {
+  color: var(--app-text);
+}
+.tab-btn.active {
+  color: var(--app-accent);
+  border-bottom-color: var(--app-accent);
+}
+
+[data-theme="eighties"] .tab-btn {
+  font-weight: 400;
   text-shadow: none;
   letter-spacing: 0.05em;
 }
-.tab-btn:hover {
-  color: var(--crt-text);
-  text-shadow: var(--crt-glow);
+[data-theme="eighties"] .tab-btn:hover {
+  text-shadow: var(--app-glow);
 }
-.tab-btn.active {
-  color: var(--crt-bright);
-  border-bottom-color: var(--crt-bright);
+[data-theme="eighties"] .tab-btn.active {
   text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
 }
 
@@ -145,7 +189,7 @@ const settings = useSettingsStore();
   align-items: center;
   justify-content: center;
   padding: 0.5rem 1rem;
-  border-top: 1px solid var(--crt-border);
+  border-top: 1px solid var(--app-border);
   flex-shrink: 0;
 }
 
@@ -153,12 +197,34 @@ const settings = useSettingsStore();
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  font-size: 0.8125rem;
+  color: var(--app-muted);
+}
+
+[data-theme="eighties"] .engine-status {
   font-size: 16px;
-  color: var(--crt-dim);
   letter-spacing: 0.05em;
 }
 
 .status-indicator {
-  color: var(--crt-text);
+  color: var(--app-text);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot--on {
+  background: var(--app-success);
+  box-shadow: 0 0 6px var(--app-success);
+}
+.status-dot--off {
+  background: var(--app-muted);
+}
+
+.device-badge {
+  color: var(--app-muted);
 }
 </style>

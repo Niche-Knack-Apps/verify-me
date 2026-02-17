@@ -27,91 +27,132 @@ function handleClick(event: MouseEvent) {
 <template>
   <button
     :class="[
-      'crt-btn',
-      `crt-btn--${variant}`,
-      `crt-btn--${size}`,
-      { 'crt-btn--disabled': disabled || loading },
+      'app-btn',
+      `app-btn--${variant}`,
+      `app-btn--${size}`,
+      { 'app-btn--disabled': disabled || loading },
     ]"
     :disabled="disabled || loading"
     @click="handleClick"
   >
-    <span v-if="loading" class="crt-btn__spinner">[...]</span>
+    <span v-if="loading" class="app-btn__spinner">[...]</span>
     <slot />
   </button>
 </template>
 
 <style scoped>
-.crt-btn {
+.app-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 0.375rem;
-  font-family: 'VT323', monospace;
-  border-radius: 0;
+  font-family: var(--app-font);
+  border-radius: var(--app-radius);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, filter 0.15s;
+  font-weight: 500;
+}
+
+[data-theme="eighties"] .app-btn {
+  font-weight: 400;
   letter-spacing: 0.05em;
 }
 
-/* Variants */
-.crt-btn--primary {
-  background: transparent;
-  color: var(--crt-bright);
-  border: 1px solid var(--crt-bright);
-  text-shadow: 0 0 6px rgba(51, 255, 0, 0.4);
+/* Variants — Modern */
+.app-btn--primary {
+  background: var(--app-accent);
+  color: #fff;
+  border: 1px solid var(--app-accent);
 }
-.crt-btn--primary:hover:not(:disabled) {
-  background: rgba(51, 255, 0, 0.08);
-  text-shadow: 0 0 10px rgba(51, 255, 0, 0.6);
+.app-btn--primary:hover:not(:disabled) {
+  filter: brightness(1.1);
 }
 
-.crt-btn--secondary {
+.app-btn--secondary {
   background: transparent;
-  color: var(--crt-text);
-  border: 1px solid var(--crt-border);
+  color: var(--app-text);
+  border: 1px solid var(--app-border);
 }
-.crt-btn--secondary:hover:not(:disabled) {
-  border-color: var(--crt-text);
-  text-shadow: var(--crt-glow);
+.app-btn--secondary:hover:not(:disabled) {
+  border-color: var(--app-accent);
+  color: var(--app-accent);
+  background: var(--app-accent-hover-bg);
 }
 
-.crt-btn--ghost {
+.app-btn--ghost {
   background: transparent;
-  color: var(--crt-dim);
+  color: var(--app-muted);
   border: 1px solid transparent;
 }
-.crt-btn--ghost:hover:not(:disabled) {
-  color: var(--crt-text);
-  border-color: var(--crt-border);
-  text-shadow: var(--crt-glow);
+.app-btn--ghost:hover:not(:disabled) {
+  color: var(--app-text);
+  background: var(--app-accent-hover-bg);
+}
+
+/* 80's overrides */
+[data-theme="eighties"] .app-btn--primary {
+  background: transparent;
+  color: var(--app-accent);
+  text-shadow: 0 0 6px rgba(51, 255, 0, 0.4);
+}
+[data-theme="eighties"] .app-btn--primary:hover:not(:disabled) {
+  background: rgba(51, 255, 0, 0.08);
+  text-shadow: 0 0 10px rgba(51, 255, 0, 0.6);
+  filter: none;
+}
+
+[data-theme="eighties"] .app-btn--secondary:hover:not(:disabled) {
+  background: transparent;
+  text-shadow: var(--app-glow);
+}
+
+[data-theme="eighties"] .app-btn--ghost {
+  border: 1px solid transparent;
+}
+[data-theme="eighties"] .app-btn--ghost:hover:not(:disabled) {
+  color: var(--app-text);
+  border-color: var(--app-border);
+  background: transparent;
+  text-shadow: var(--app-glow);
 }
 
 /* Sizes */
-.crt-btn--sm {
+.app-btn--sm {
   padding: 0.125rem 0.5rem;
+  font-size: 0.8125rem;
+}
+
+[data-theme="eighties"] .app-btn--sm {
   font-size: 16px;
 }
 
-.crt-btn--md {
+.app-btn--md {
   padding: 0.375rem 0.75rem;
-  font-size: 18px;
+  font-size: 0.875rem;
   min-height: 44px;
 }
 
-.crt-btn--lg {
+[data-theme="eighties"] .app-btn--md {
+  font-size: 18px;
+}
+
+.app-btn--lg {
   padding: 0.5rem 1rem;
-  font-size: 20px;
+  font-size: 1rem;
   min-height: 44px;
+}
+
+[data-theme="eighties"] .app-btn--lg {
+  font-size: 20px;
 }
 
 /* Disabled */
-.crt-btn--disabled {
+.app-btn--disabled {
   opacity: 0.4;
   cursor: not-allowed;
-  text-shadow: none;
 }
 
-.crt-btn__spinner {
+.app-btn__spinner {
   animation: blink-cursor 0.8s step-end infinite;
 }
 </style>

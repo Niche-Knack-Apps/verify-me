@@ -38,7 +38,10 @@
       "icons/icon.png"
     ],
     "resources": {
-      "resources/models/*": "models/"
+      "resources/models/pocket-tts/*": "models/pocket-tts/",
+      "resources/models/pocket-tts/embeddings_v2/*": "models/pocket-tts/embeddings_v2/",
+      "../engine/*.py": "engine/",
+      "../engine/models/*.py": "engine/models/"
     },
     "linux": {
       "appimage": {

@@ -52,16 +52,27 @@ impl EngineManager {
         self.process.is_some()
     }
 
-    pub fn start(&mut self, engine_path: &str) -> Result<(), String> {
+    pub fn start(
+        &mut self,
+        python_path: &str,
+        engine_path: &str,
+        env_vars: Vec<(&str, String)>,
+    ) -> Result<(), String> {
         if self.is_running() {
             return Err("Engine is already running".into());
         }
 
-        let mut child = Command::new("python3")
-            .arg(engine_path)
+        let mut cmd = Command::new(python_path);
+        cmd.arg(engine_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        for (key, val) in &env_vars {
+            cmd.env(key, val);
+        }
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn engine process: {}", e))?;
 

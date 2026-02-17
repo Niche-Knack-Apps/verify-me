@@ -1,4 +1,6 @@
 use crate::commands::engine::EngineState;
+use crate::services::path_service;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 
 fn ensure_engine_state(app: &AppHandle) {
@@ -7,6 +9,25 @@ fn ensure_engine_state(app: &AppHandle) {
             crate::services::engine_manager::EngineManager::new(),
         )));
     }
+}
+
+fn generate_output_path(prefix: &str) -> Result<String, String> {
+    let output_dir = path_service::get_user_data_dir()
+        .map_err(|e| format!("Failed to get data dir: {}", e))?
+        .join("output");
+
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("Failed to create output dir: {}", e))?;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("Time error: {}", e))?
+        .as_millis();
+
+    let path = output_dir.join(format!("{}_{}.wav", prefix, timestamp));
+    path.to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Invalid output path".into())
 }
 
 #[tauri::command]
@@ -30,11 +51,14 @@ pub async fn generate_speech(
         return Err("Engine is not running. Start the engine first.".into());
     }
 
+    let output_path = generate_output_path("tts")?;
+
     let mut params = serde_json::json!({
         "text": text,
         "model_id": model_id,
         "voice": voice,
         "speed": speed.unwrap_or(1.0),
+        "output_path": output_path,
     });
 
     if let Some(ref prompt) = voice_prompt {
@@ -68,13 +92,16 @@ pub async fn voice_clone(
         return Err("Engine is not running. Start the engine first.".into());
     }
 
+    let output_path = generate_output_path("clone")?;
+
     let params = serde_json::json!({
         "text": text,
         "reference_audio": reference_audio,
         "model_id": model_id,
+        "output_path": output_path,
     });
 
-    let result = manager.send_request("tts.voice_clone", Some(params))?;
+    let result = manager.send_request("voice.clone", Some(params))?;
 
     result["audio_path"]
         .as_str()
@@ -103,7 +130,7 @@ pub async fn get_voices(
         "model_id": model_id,
     });
 
-    let result = manager.send_request("tts.get_voices", Some(params))?;
+    let result = manager.send_request("tts.voices", Some(params))?;
 
     result["voices"]
         .as_array()
