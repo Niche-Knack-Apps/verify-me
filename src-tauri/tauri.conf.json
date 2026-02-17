@@ -14,7 +14,7 @@
       {
         "title": "Verify Me",
         "width": 900,
-        "height": 700,
+        "height": 860,
         "minWidth": 700,
         "minHeight": 500,
         "resizable": true,
