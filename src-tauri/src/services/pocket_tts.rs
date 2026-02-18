@@ -14,12 +14,17 @@ const HEAD_DIM: usize = 64;
 const NUM_LAYERS: usize = 6;
 const EOS_THRESHOLD: f32 = -4.0;
 
-/// Maximum reference audio duration in seconds for voice cloning.
-/// Longer clips get truncated to prevent OOM / system freeze.
-const MAX_REFERENCE_SECONDS: f32 = 30.0;
+/// Target reference audio duration in seconds for voice cloning.
+/// Testing showed 10-15s is the sweet spot — too short (<8s) or too long (>18s)
+/// causes the model to fail to detect EOS and produce garbage output.
+const TARGET_REFERENCE_SECONDS: f32 = 12.0;
 
-/// Maximum samples for reference audio (30s × 24kHz).
-const MAX_REFERENCE_SAMPLES: usize = (MAX_REFERENCE_SECONDS * SAMPLE_RATE as f32) as usize;
+/// Minimum usable reference audio duration (seconds).
+const MIN_REFERENCE_SECONDS: f32 = 3.0;
+
+/// Maximum reference audio duration before smart selection kicks in.
+/// Audio longer than this gets analyzed and the best window is extracted.
+const MAX_REFERENCE_SECONDS: f32 = 15.0;
 
 // ── State value: typed tensor for ONNX state carry-over ─────────
 
@@ -502,31 +507,30 @@ impl PocketTTSEngine {
             t.elapsed().as_millis()
         );
 
-        // 3. Load and validate reference audio
+        // 3. Load, validate, and smart-select reference audio
         let t = std::time::Instant::now();
-        let mut ref_samples = load_audio_samples(reference_audio)?;
-        let original_len = ref_samples.len();
-        let original_duration = original_len as f32 / SAMPLE_RATE as f32;
+        let ref_samples = load_audio_samples(reference_audio)?;
 
         if ref_samples.is_empty() {
             return Err("Reference audio is empty".into());
         }
 
-        // Truncate overly long reference audio to prevent OOM
-        if ref_samples.len() > MAX_REFERENCE_SAMPLES {
-            log::warn!(
-                "[Clone 3/8] Reference audio too long ({:.1}s, {} samples) — truncating to {:.0}s",
-                original_duration,
-                original_len,
-                MAX_REFERENCE_SECONDS
-            );
-            ref_samples.truncate(MAX_REFERENCE_SAMPLES);
+        let original_duration = ref_samples.len() as f32 / SAMPLE_RATE as f32;
+        if original_duration < MIN_REFERENCE_SECONDS {
+            return Err(format!(
+                "Reference audio too short ({:.1}s) — need at least {:.0}s",
+                original_duration, MIN_REFERENCE_SECONDS
+            ));
         }
+
+        // Smart-select the best window for voice cloning
+        let ref_samples = select_best_audio_window(ref_samples, SAMPLE_RATE);
 
         let ref_duration = ref_samples.len() as f32 / SAMPLE_RATE as f32;
         let ref_mb = (ref_samples.len() * 4) as f64 / 1_048_576.0;
         log::info!(
-            "[Clone 3/8] Reference audio loaded: {:.1}s ({} samples, {:.1} MB) ({} ms)",
+            "[Clone 3/8] Reference audio: {:.1}s original → {:.1}s selected ({} samples, {:.1} MB) ({} ms)",
+            original_duration,
             ref_duration,
             ref_samples.len(),
             ref_mb,
@@ -541,10 +545,22 @@ impl PocketTTSEngine {
         );
         let (audio_conditioning, audio_cond_len) =
             self.encode_reference_audio(&ref_samples)?;
+        // Diagnostic: dump encoder output statistics for comparison with Python test
+        let ac_mean: f32 = if audio_conditioning.is_empty() { 0.0 } else {
+            audio_conditioning.iter().sum::<f32>() / audio_conditioning.len() as f32
+        };
+        let ac_std: f32 = if audio_conditioning.len() < 2 { 0.0 } else {
+            let variance = audio_conditioning.iter()
+                .map(|x| (x - ac_mean).powi(2))
+                .sum::<f32>() / audio_conditioning.len() as f32;
+            variance.sqrt()
+        };
         log::info!(
-            "[Clone 4/8] Mimi encode done: {} conditioning frames, {} floats ({} ms)",
+            "[Clone 4/8] Mimi encode done: {} frames, {} floats, mean={:.6}, std={:.6} ({} ms)",
             audio_cond_len,
             audio_conditioning.len(),
+            ac_mean,
+            ac_std,
             t.elapsed().as_millis()
         );
 
@@ -566,10 +582,14 @@ impl PocketTTSEngine {
             flow_states,
         )?
         .2;
-        log::info!(
-            "[Clone 6/8] Voice conditioning done ({} ms)",
-            t.elapsed().as_millis()
-        );
+        // Diagnostic: check step counter after voice conditioning
+        if let StateValue::I64(_, data) = &flow_states[2] {
+            log::info!(
+                "[Clone 6/8] Voice conditioning done ({} ms), layer_0_step={}",
+                t.elapsed().as_millis(),
+                data.first().copied().unwrap_or(-1)
+            );
+        }
 
         // Drop audio conditioning to free memory before generation
         drop(audio_conditioning);
@@ -589,10 +609,14 @@ impl PocketTTSEngine {
             flow_states,
         )?
         .2;
-        log::info!(
-            "[Clone 7/8] Text conditioning done ({} ms)",
-            t.elapsed().as_millis()
-        );
+        // Diagnostic: check step counter after text conditioning
+        if let StateValue::I64(_, data) = &flow_states[2] {
+            log::info!(
+                "[Clone 7/8] Text conditioning done ({} ms), layer_0_step={}",
+                t.elapsed().as_millis(),
+                data.first().copied().unwrap_or(-1)
+            );
+        }
 
         // Drop text embeddings before generation loop
         drop(text_embeddings);
@@ -864,6 +888,20 @@ impl PocketTTSEngine {
 
             // Run flow matching: conditioning → latent
             let latent = self.run_flow_matching(&conditioning)?;
+
+            // Diagnostic: log EOS and latent stats for first 5 steps and every 25th step
+            if step < 5 || step % 25 == 0 {
+                let lat_mean: f32 = latent.iter().sum::<f32>() / latent.len() as f32;
+                let lat_std: f32 = {
+                    let var = latent.iter().map(|x| (x - lat_mean).powi(2)).sum::<f32>()
+                        / latent.len() as f32;
+                    var.sqrt()
+                };
+                log::info!(
+                    "  AR step {}: eos={:.4}, latent mean={:.4}, std={:.4}",
+                    step, eos_logit, lat_mean, lat_std
+                );
+            }
 
             latents.push(latent.clone());
             backbone_input = latent;
@@ -1236,6 +1274,174 @@ fn load_audio_samples(path: &Path) -> Result<Vec<f32>, String> {
     );
 
     Ok(samples)
+}
+
+/// Select the best audio window for voice cloning.
+///
+/// The model works best with 10–15 seconds of clean speech. This function:
+/// 1. If audio is already within the target range, returns it as-is.
+/// 2. For longer audio, analyzes RMS energy in overlapping windows to find the
+///    segment with the strongest, most consistent speech signal.
+/// 3. Trims leading/trailing silence from the selected window.
+fn select_best_audio_window(samples: Vec<f32>, sample_rate: u32) -> Vec<f32> {
+    let target_samples = (TARGET_REFERENCE_SECONDS * sample_rate as f32) as usize;
+    let max_samples = (MAX_REFERENCE_SECONDS * sample_rate as f32) as usize;
+
+    // Short enough already — just trim silence and return
+    if samples.len() <= max_samples {
+        let trimmed = trim_silence(&samples, sample_rate);
+        log::info!(
+            "Audio within target range ({:.1}s) — trimmed silence: {:.1}s → {:.1}s",
+            samples.len() as f32 / sample_rate as f32,
+            samples.len() as f32 / sample_rate as f32,
+            trimmed.len() as f32 / sample_rate as f32,
+        );
+        return trimmed;
+    }
+
+    // Audio is too long — find the best window
+    log::info!(
+        "Audio too long ({:.1}s) — searching for best {:.0}s window",
+        samples.len() as f32 / sample_rate as f32,
+        TARGET_REFERENCE_SECONDS
+    );
+
+    // Compute RMS energy in 0.5s frames
+    let frame_size = (sample_rate as usize) / 2; // 0.5s frames
+    let num_frames = samples.len() / frame_size;
+    if num_frames == 0 {
+        return samples;
+    }
+
+    let mut frame_rms: Vec<f32> = Vec::with_capacity(num_frames);
+    for i in 0..num_frames {
+        let start = i * frame_size;
+        let end = (start + frame_size).min(samples.len());
+        let rms = (samples[start..end]
+            .iter()
+            .map(|s| s * s)
+            .sum::<f32>()
+            / (end - start) as f32)
+            .sqrt();
+        frame_rms.push(rms);
+    }
+
+    // Compute overall RMS threshold to distinguish speech from silence
+    let mean_rms = frame_rms.iter().sum::<f32>() / frame_rms.len() as f32;
+    let silence_threshold = mean_rms * 0.15; // frames below 15% of mean are "silence"
+
+    // Find the best window of target_samples length
+    // Score = sum of RMS in speech frames, penalizing silence gaps
+    let window_frames = (TARGET_REFERENCE_SECONDS * 2.0) as usize; // frames in target window
+    let window_frames = window_frames.min(num_frames);
+
+    let mut best_score: f32 = f32::NEG_INFINITY;
+    let mut best_start_frame: usize = 0;
+
+    let search_end = num_frames.saturating_sub(window_frames) + 1;
+    for start in 0..search_end {
+        let end = (start + window_frames).min(num_frames);
+        let window = &frame_rms[start..end];
+
+        // Score: total energy of speech frames minus penalty for silence
+        let mut speech_energy: f32 = 0.0;
+        let mut silence_count: usize = 0;
+        for &rms in window {
+            if rms > silence_threshold {
+                speech_energy += rms;
+            } else {
+                silence_count += 1;
+            }
+        }
+
+        // Penalize windows with lots of silence (e.g., long pauses)
+        let silence_ratio = silence_count as f32 / window.len() as f32;
+        let score = speech_energy * (1.0 - silence_ratio * 0.5);
+
+        if score > best_score {
+            best_score = score;
+            best_start_frame = start;
+        }
+    }
+
+    // Convert frame index to sample index
+    let start_sample = best_start_frame * frame_size;
+    let end_sample = (start_sample + target_samples).min(samples.len());
+
+    log::info!(
+        "Best window: frames {}..{} ({:.1}s..{:.1}s), score={:.4}",
+        best_start_frame,
+        best_start_frame + window_frames,
+        start_sample as f32 / sample_rate as f32,
+        end_sample as f32 / sample_rate as f32,
+        best_score
+    );
+
+    let selected = samples[start_sample..end_sample].to_vec();
+
+    // Trim silence from the selected window
+    trim_silence(&selected, sample_rate)
+}
+
+/// Trim leading and trailing silence from audio.
+/// Uses a conservative RMS threshold so we don't cut into speech.
+fn trim_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    let frame_size = (sample_rate as usize) / 20; // 50ms frames for fine granularity
+    let num_frames = samples.len() / frame_size;
+    if num_frames == 0 {
+        return samples.to_vec();
+    }
+
+    // Compute per-frame RMS
+    let frame_rms: Vec<f32> = (0..num_frames)
+        .map(|i| {
+            let start = i * frame_size;
+            let end = (start + frame_size).min(samples.len());
+            (samples[start..end].iter().map(|s| s * s).sum::<f32>()
+                / (end - start) as f32)
+                .sqrt()
+        })
+        .collect();
+
+    // Threshold: 5% of peak RMS (conservative — don't cut speech)
+    let peak_rms = frame_rms.iter().cloned().fold(0.0f32, f32::max);
+    if peak_rms < 1e-6 {
+        return samples.to_vec(); // all silence, return as-is
+    }
+    let threshold = peak_rms * 0.05;
+
+    // Find first and last speech frames
+    let first_speech = frame_rms.iter().position(|&r| r > threshold).unwrap_or(0);
+    let last_speech = frame_rms
+        .iter()
+        .rposition(|&r| r > threshold)
+        .unwrap_or(num_frames - 1);
+
+    // Add a small margin (100ms) to avoid cutting transients
+    let margin_frames = 2; // 2 × 50ms = 100ms
+    let start_frame = first_speech.saturating_sub(margin_frames);
+    let end_frame = (last_speech + margin_frames + 1).min(num_frames);
+
+    let start_sample = start_frame * frame_size;
+    let end_sample = (end_frame * frame_size).min(samples.len());
+
+    let trimmed_duration = (end_sample - start_sample) as f32 / sample_rate as f32;
+    let original_duration = samples.len() as f32 / sample_rate as f32;
+    if (original_duration - trimmed_duration).abs() > 0.2 {
+        log::info!(
+            "Trimmed silence: {:.1}s → {:.1}s (removed {:.1}s lead, {:.1}s trail)",
+            original_duration,
+            trimmed_duration,
+            start_sample as f32 / sample_rate as f32,
+            (samples.len() - end_sample) as f32 / sample_rate as f32,
+        );
+    }
+
+    samples[start_sample..end_sample].to_vec()
 }
 
 fn resample_audio(audio: &[f32], speed: f32) -> Vec<f32> {

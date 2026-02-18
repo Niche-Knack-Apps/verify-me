@@ -1,6 +1,6 @@
 {
   "name": "verify-me",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Text-to-Speech and Voice Cloning desktop application",
   "type": "module",
   "license": "Apache-2.0",

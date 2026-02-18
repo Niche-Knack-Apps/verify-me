@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Verify Me",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "identifier": "com.niche-knack.verify-me",
   "build": {
     "beforeDevCommand": "npm run dev:vite",
