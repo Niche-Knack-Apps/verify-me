@@ -1,14 +1,12 @@
-use crate::commands::engine::EngineState;
 use crate::commands::models::VoiceInfo;
+use crate::services::onnx_engine::{EngineState, OnnxEngine};
 use crate::services::path_service;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 
 fn ensure_engine_state(app: &AppHandle) {
     if app.try_state::<EngineState>().is_none() {
-        app.manage(EngineState(std::sync::Mutex::new(
-            crate::services::engine_manager::EngineManager::new(),
-        )));
+        app.manage(EngineState(std::sync::Arc::new(std::sync::Mutex::new(OnnxEngine::new()))));
     }
 }
 
@@ -35,48 +33,56 @@ fn generate_output_path(prefix: &str) -> Result<String, String> {
 pub async fn generate_speech(
     app: AppHandle,
     text: String,
-    model_id: String,
+    _model_id: String,
     voice: String,
     speed: Option<f32>,
-    voice_prompt: Option<String>,
-    voice_mode: Option<String>,
-    voice_description: Option<String>,
+    _voice_prompt: Option<String>,
+    _voice_mode: Option<String>,
+    _voice_description: Option<String>,
 ) -> Result<String, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-
-    if !manager.is_running() {
-        return Err("Engine is not running. Click 'Start Engine' in the status bar or Settings.".into());
+    // Check engine is running before spawning the blocking task
+    {
+        let engine = state.0.lock().unwrap_or_else(|e| {
+            log::warn!("Recovering from poisoned engine lock");
+            e.into_inner()
+        });
+        if !engine.is_running() {
+            return Err(
+                "Engine is not running. Open Settings to start the engine.".into(),
+            );
+        }
     }
 
     let output_path = generate_output_path("tts")?;
+    let speed = speed.unwrap_or(1.0);
 
-    let mut params = serde_json::json!({
-        "text": text,
-        "model_id": model_id,
-        "voice": voice,
-        "speed": speed.unwrap_or(1.0),
-        "output_path": output_path,
-    });
+    log::info!(
+        "Generating speech: voice={}, speed={}, text={}...",
+        voice,
+        speed,
+        &text[..std::cmp::min(text.len(), 50)]
+    );
 
-    if let Some(ref prompt) = voice_prompt {
-        params["voice_prompt"] = serde_json::json!(prompt);
-    }
-    if let Some(ref mode) = voice_mode {
-        params["voice_mode"] = serde_json::json!(mode);
-    }
-    if let Some(ref desc) = voice_description {
-        params["voice_description"] = serde_json::json!(desc);
-    }
+    // Run inference on a blocking thread so the Tauri event loop stays responsive
+    let engine_state = app.state::<EngineState>().inner().clone();
+    let output_clone = output_path.clone();
 
-    let result = manager.send_request("tts.generate", Some(params))?;
+    tokio::task::spawn_blocking(move || {
+        let mut engine = engine_state.0.lock().unwrap_or_else(|e| {
+            log::warn!("Recovering from poisoned engine lock (blocking)");
+            e.into_inner()
+        });
 
-    result["audio_path"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "Engine did not return an audio path".into())
+        engine.generate_speech(&text, &voice, speed, std::path::Path::new(&output_clone))
+    })
+    .await
+    .map_err(|e| format!("Speech generation task panicked: {}", e))??;
+
+    log::info!("Speech generated: {}", output_path);
+    Ok(output_path)
 }
 
 #[tauri::command]
@@ -84,76 +90,91 @@ pub async fn voice_clone(
     app: AppHandle,
     text: String,
     reference_audio: String,
-    model_id: String,
+    _model_id: String,
 ) -> Result<String, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-
-    if !manager.is_running() {
-        return Err("Engine is not running. Click 'Start Engine' in the status bar or Settings.".into());
+    // Check engine is running before spawning the blocking task
+    {
+        let engine = state.0.lock().unwrap_or_else(|e| {
+            log::warn!("Recovering from poisoned engine lock");
+            e.into_inner()
+        });
+        if !engine.is_running() {
+            return Err(
+                "Engine is not running. Open Settings to start the engine.".into(),
+            );
+        }
     }
 
     let output_path = generate_output_path("clone")?;
 
-    let params = serde_json::json!({
-        "text": text,
-        "reference_audio": reference_audio,
-        "model_id": model_id,
-        "output_path": output_path,
-    });
+    log::info!("Voice clone request: ref={}, text={}...", reference_audio, &text[..std::cmp::min(text.len(), 50)]);
 
-    let result = manager.send_request("voice.clone", Some(params))?;
+    // Run inference on a blocking thread so the Tauri event loop stays responsive.
+    // This prevents the UI from freezing during the (potentially long) clone operation.
+    let engine_state = app.state::<EngineState>().inner().clone();
+    let text_clone = text.clone();
+    let ref_audio_clone = reference_audio.clone();
+    let output_clone = output_path.clone();
 
-    result["audio_path"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "Engine did not return an audio path".into())
+    tokio::task::spawn_blocking(move || {
+        let mut engine = engine_state.0.lock().unwrap_or_else(|e| {
+            log::warn!("Recovering from poisoned engine lock (blocking)");
+            e.into_inner()
+        });
+
+        engine.clone_voice(
+            &text_clone,
+            std::path::Path::new(&ref_audio_clone),
+            std::path::Path::new(&output_clone),
+        )
+    })
+    .await
+    .map_err(|e| format!("Voice clone task panicked: {}", e))??;
+
+    log::info!("Voice clone generated: {}", output_path);
+    Ok(output_path)
 }
 
 #[tauri::command]
-pub async fn get_voices(app: AppHandle, model_id: String) -> Result<Vec<VoiceInfo>, String> {
+pub async fn get_voices(app: AppHandle, _model_id: String) -> Result<Vec<VoiceInfo>, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
-
-    if !manager.is_running() {
-        return Err("Engine is not running. Click 'Start Engine' in the status bar or Settings.".into());
-    }
-
-    let params = serde_json::json!({
-        "model_id": model_id,
+    let engine = state.0.lock().unwrap_or_else(|e| {
+        log::warn!("Recovering from poisoned engine lock");
+        e.into_inner()
     });
 
-    let result = manager.send_request("tts.voices", Some(params))?;
+    if !engine.is_running() {
+        return Err(
+            "Engine is not running. Open Settings to start the engine.".into(),
+        );
+    }
 
-    result["voices"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| {
-                    // Handle voice objects: {"id": "...", "name": "...", "language": "..."}
-                    if let Some(obj) = v.as_object() {
-                        let id = obj.get("id")?.as_str()?.to_string();
-                        let name = obj
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or_else(|| obj.get("id").unwrap().as_str().unwrap())
-                            .to_string();
-                        Some(VoiceInfo { id, name })
-                    } else if let Some(s) = v.as_str() {
-                        // Fallback: plain string voice IDs
-                        Some(VoiceInfo {
-                            id: s.to_string(),
-                            name: s.to_string(),
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect()
+    let voice_ids = engine.get_voices()?;
+
+    let voices = voice_ids
+        .iter()
+        .map(|id| VoiceInfo {
+            id: id.clone(),
+            name: format_voice_name(id),
         })
-        .ok_or_else(|| "Engine did not return voices".into())
+        .collect();
+
+    Ok(voices)
+}
+
+/// Convert a voice ID to a display name (capitalize, replace underscores).
+fn format_voice_name(id: &str) -> String {
+    let mut chars = id.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => {
+            let rest: String = chars.collect();
+            format!("{}{}", first.to_uppercase(), rest.replace('_', " "))
+        }
+    }
 }

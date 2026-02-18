@@ -64,9 +64,6 @@ export const useSettingsStore = defineStore('settings', () => {
   const engineRunning = ref(false);
   const engineStarting = ref(false);
   const engineError = ref<string | null>(null);
-  const pythonEnvReady = ref<boolean | null>(null);
-  const pythonEnvIssue = ref<string | null>(null);
-  const settingUpPython = ref(false);
   const deviceType = ref('CPU');
   const outputDirectory = ref('');
   const modelsDirectory = ref('');
@@ -117,11 +114,24 @@ export const useSettingsStore = defineStore('settings', () => {
     try {
       if (isCapacitor()) {
         const TTSEngine = await getTTSEngine();
-        // On Android, initialize with the first available model
         const ModelManager = await getModelManager();
         const listResult = await ModelManager.listModels();
-        const available = listResult.models?.find((m: any) => m.status === 'available');
+        const allModels = listResult.models ?? [];
+        let available = allModels.find((m: any) => m.status === 'available');
+
+        // If no available models but bundled exist, extract them first
+        if (!available) {
+          const hasBundled = allModels.some((m: any) => m.status === 'bundled');
+          if (hasBundled) {
+            console.log('[Engine] No available models, extracting bundled models...');
+            await ModelManager.extractBundledModels();
+            const refreshed = await ModelManager.listModels();
+            available = (refreshed.models ?? []).find((m: any) => m.status === 'available');
+          }
+        }
+
         if (available) {
+          console.log('[Engine] Initializing with model:', available.id);
           const result = await TTSEngine.initialize({ modelId: available.id });
           engineRunning.value = result.success === true;
           if (engineRunning.value) {
@@ -130,6 +140,7 @@ export const useSettingsStore = defineStore('settings', () => {
         } else {
           engineRunning.value = false;
           deviceType.value = 'No model';
+          engineError.value = 'No models available. Extract bundled models or download a model in Settings.';
         }
       } else {
         const { invoke } = await import('@tauri-apps/api/core');
@@ -212,42 +223,6 @@ export const useSettingsStore = defineStore('settings', () => {
     await startEngine();
   }
 
-  async function checkPythonEnvironment() {
-    if (isCapacitor()) return;
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      const result = await invoke<{ ready: boolean; pythonPath: string; issue?: string }>('check_python_environment');
-      pythonEnvReady.value = result.ready;
-      pythonEnvIssue.value = result.issue ?? null;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error('Failed to check Python environment:', msg);
-      pythonEnvReady.value = false;
-      pythonEnvIssue.value = msg;
-    }
-  }
-
-  async function setupPythonEnvironment() {
-    if (isCapacitor()) return;
-    settingUpPython.value = true;
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke<string>('setup_python_environment');
-      await checkPythonEnvironment();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error('Failed to set up Python environment:', msg);
-      pythonEnvIssue.value = msg;
-    } finally {
-      settingUpPython.value = false;
-    }
-  }
-
-  async function initEngine() {
-    await checkPythonEnvironment();
-    await startEngine();
-  }
-
   async function loadModelsDirectory() {
     try {
       if (isCapacitor()) {
@@ -269,9 +244,6 @@ export const useSettingsStore = defineStore('settings', () => {
     engineRunning,
     engineStarting,
     engineError,
-    pythonEnvReady,
-    pythonEnvIssue,
-    settingUpPython,
     deviceType,
     outputDirectory,
     modelsDirectory,
@@ -287,9 +259,6 @@ export const useSettingsStore = defineStore('settings', () => {
     stopEngine,
     restartEngine,
     checkEngineHealth,
-    checkPythonEnvironment,
-    setupPythonEnvironment,
-    initEngine,
     loadModelsDirectory,
   };
 });

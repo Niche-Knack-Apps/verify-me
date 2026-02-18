@@ -185,9 +185,17 @@ onMounted(() => {
                       </button>
                     </div>
                     <!-- Extracting -->
-                    <span v-else-if="model.status === 'extracting' || model.status === 'bundled'" class="action-link" style="cursor:default;opacity:0.7">
-                      {{ settings.isEighties ? '[SETUP...]' : 'Setting up...' }}
+                    <span v-else-if="model.status === 'extracting'" class="action-link" style="cursor:default;opacity:0.7">
+                      {{ settings.isEighties ? '[SETUP...]' : 'Extracting...' }}
                     </span>
+                    <!-- Bundled but not yet extracted -->
+                    <button
+                      v-else-if="model.status === 'bundled'"
+                      class="action-link"
+                      @click="modelsStore.extractBundledModels()"
+                    >
+                      {{ settings.isEighties ? '[EXTRACT]' : 'Extract' }}
+                    </button>
                     <!-- Download button -->
                     <button
                       v-else-if="model.status === 'downloadable'"
@@ -316,26 +324,6 @@ onMounted(() => {
               {{ settings.isEighties ? `ERROR: ${settings.engineError}` : settings.engineError }}
             </p>
 
-            <!-- Python Environment Warning -->
-            <div v-if="settings.pythonEnvReady === false" class="python-warning">
-              <p class="python-warning-text">
-                {{ settings.isEighties
-                  ? `// PYTHON ENV ISSUE: ${settings.pythonEnvIssue ?? 'DEPS NOT INSTALLED'}`
-                  : `Python environment issue: ${settings.pythonEnvIssue ?? 'Dependencies not installed'}`
-                }}
-              </p>
-              <Button
-                variant="primary"
-                size="sm"
-                :disabled="settings.settingUpPython"
-                @click="settings.setupPythonEnvironment()"
-              >
-                {{ settings.isEighties
-                  ? (settings.settingUpPython ? '[INSTALLING...]' : '[INSTALL DEPS]')
-                  : (settings.settingUpPython ? 'Installing...' : 'Install Dependencies')
-                }}
-              </Button>
-            </div>
           </div>
         </div>
 
@@ -773,29 +761,6 @@ onMounted(() => {
 [data-theme="eighties"] .engine-error {
   font-size: 14px;
   border-radius: 0;
-}
-
-.python-warning {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  padding: 0.5rem;
-  background: rgba(234, 179, 8, 0.08);
-  border: 1px solid rgba(234, 179, 8, 0.3);
-  border-radius: var(--app-radius);
-}
-
-[data-theme="eighties"] .python-warning {
-  border-radius: 0;
-}
-
-.python-warning-text {
-  font-size: 0.8125rem;
-  color: var(--app-muted);
-}
-
-[data-theme="eighties"] .python-warning-text {
-  font-size: 14px;
 }
 
 .cancel-btn {

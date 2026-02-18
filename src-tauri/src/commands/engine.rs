@@ -1,45 +1,111 @@
-use crate::services::engine_manager::EngineManager;
-use crate::services::python_resolver;
+use crate::services::onnx_engine::{EngineState, OnnxEngine};
+use crate::services::path_service;
 use serde_json::Value;
-use std::sync::Mutex;
+use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
-
-pub struct EngineState(pub Mutex<EngineManager>);
 
 fn ensure_engine_state(app: &AppHandle) {
     if app.try_state::<EngineState>().is_none() {
-        app.manage(EngineState(Mutex::new(EngineManager::new())));
+        app.manage(EngineState(std::sync::Arc::new(std::sync::Mutex::new(OnnxEngine::new()))));
     }
 }
 
+/// Resolve the models directory for the given model_id.
+/// Checks bundled resources first, then user's app data models dir.
+fn resolve_model_dir(app: &AppHandle, model_id: &str) -> Result<PathBuf, String> {
+    // 1. Dev mode: project-relative bundled resources
+    #[cfg(debug_assertions)]
+    {
+        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .ok_or("Failed to resolve project root")?
+            .to_path_buf();
+
+        let bundled_dir = project_root
+            .join("src-tauri")
+            .join("resources")
+            .join("models")
+            .join(model_id);
+        if bundled_dir.is_dir() {
+            return Ok(bundled_dir);
+        }
+    }
+
+    // 2. Bundled in resource dir (production)
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let bundled_dir = resource_dir.join("models").join(model_id);
+        if bundled_dir.is_dir() {
+            return Ok(bundled_dir);
+        }
+    }
+
+    // 3. User's downloaded models in app_data_dir/models/
+    let app_data_models = path_service::get_models_dir()?;
+    let downloaded_dir = app_data_models.join(model_id);
+    if downloaded_dir.is_dir() {
+        return Ok(downloaded_dir);
+    }
+
+    Err(format!(
+        "Model '{}' not found in resources or downloads",
+        model_id
+    ))
+}
+
 #[tauri::command]
-pub async fn start_engine(app: AppHandle, force_cpu: Option<bool>) -> Result<String, String> {
+pub async fn start_engine(
+    app: AppHandle,
+    model_id: Option<String>,
+    _force_cpu: Option<bool>,
+) -> Result<String, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let python = python_resolver::resolve_python(&app)?;
-    let script = python_resolver::resolve_engine_script(&app)?;
-    let models_dir = python_resolver::resolve_models_dir(&app)?;
+    // Default to pocket-tts if no model specified
+    let model_id = model_id.unwrap_or_else(|| "pocket-tts".to_string());
 
-    let python_str = python
-        .to_str()
-        .ok_or("Invalid python path")?
-        .to_string();
-    let script_str = script
-        .to_str()
-        .ok_or("Invalid engine path")?
-        .to_string();
-    let models_str = models_dir.to_str().unwrap_or("").to_string();
+    let model_dir = resolve_model_dir(&app, &model_id)?;
 
-    let mut env_vars = vec![("VERIFY_ME_MODELS_DIR", models_str)];
-    if force_cpu.unwrap_or(false) {
-        env_vars.push(("VERIFY_ME_FORCE_CPU", "1".to_string()));
+    log::info!(
+        "Starting ONNX engine: model={}, dir={}",
+        model_id,
+        model_dir.display()
+    );
+
+    // Check ORT_DYLIB_PATH
+    match std::env::var("ORT_DYLIB_PATH") {
+        Ok(path) => log::info!("ORT_DYLIB_PATH={}", path),
+        Err(_) => log::warn!("ORT_DYLIB_PATH not set — ONNX Runtime may fail to load"),
     }
 
-    let mut manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut engine = state.0.lock().unwrap_or_else(|e| {
+        log::warn!("Recovering from poisoned engine lock");
+        e.into_inner()
+    });
 
-    manager.start(&python_str, &script_str, env_vars)?;
-    Ok("Engine started successfully".into())
+    // Catch panics from ort library loading (e.g. missing libonnxruntime.so)
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine.initialize(&model_id, &model_dir)
+    }));
+
+    match result {
+        Ok(Ok(())) => Ok(format!("Engine started: {}", model_id)),
+        Ok(Err(e)) => {
+            log::error!("Engine init failed: {}", e);
+            Err(e)
+        }
+        Err(panic) => {
+            let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "Unknown panic during ONNX init".to_string()
+            };
+            log::error!("Engine init panicked: {}", msg);
+            Err(format!("ONNX Runtime failed to load: {}", msg))
+        }
+    }
 }
 
 #[tauri::command]
@@ -47,9 +113,12 @@ pub async fn stop_engine(app: AppHandle) -> Result<String, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let mut manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut engine = state.0.lock().unwrap_or_else(|e| {
+        log::warn!("Recovering from poisoned engine lock");
+        e.into_inner()
+    });
+    engine.shutdown();
 
-    manager.stop()?;
     Ok("Engine stopped".into())
 }
 
@@ -58,30 +127,25 @@ pub async fn engine_health(app: AppHandle) -> Result<Value, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let engine = state.0.lock().unwrap_or_else(|e| {
+        log::warn!("Recovering from poisoned engine lock");
+        e.into_inner()
+    });
 
-    if !manager.is_running() {
+    if !engine.is_running() {
         return Ok(serde_json::json!({
             "status": "stopped",
             "engine_running": false,
         }));
     }
 
-    match manager.health_check() {
-        Ok(health) => {
-            // Merge engine_running into the Python health response
-            let mut obj = health;
-            if let Some(map) = obj.as_object_mut() {
-                map.insert("engine_running".to_string(), serde_json::json!(true));
-            }
-            Ok(obj)
-        }
-        Err(e) => Ok(serde_json::json!({
-            "status": "error",
-            "engine_running": true,
-            "error": e,
-        })),
-    }
+    Ok(serde_json::json!({
+        "status": "ready",
+        "engine_running": true,
+        "device": "cpu",
+        "backend": "onnx",
+        "model_id": engine.current_model_id(),
+    }))
 }
 
 #[tauri::command]
@@ -89,139 +153,18 @@ pub async fn get_device_info(app: AppHandle) -> Result<Value, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let engine = state.0.lock().unwrap_or_else(|e| {
+        log::warn!("Recovering from poisoned engine lock");
+        e.into_inner()
+    });
 
-    if !manager.is_running() {
+    if !engine.is_running() {
         return Err("Engine is not running".into());
     }
 
-    manager.send_request("engine.device_info", None)
-}
-
-#[tauri::command]
-pub async fn check_python_environment(app: AppHandle) -> Result<Value, String> {
-    let python = python_resolver::resolve_python(&app)?;
-    let python_str = python.to_string_lossy().to_string();
-
-    let check_script = r#"
-import sys
-issues = []
-try:
-    import torch
-except ImportError:
-    issues.append('torch')
-try:
-    import soundfile
-except ImportError:
-    issues.append('soundfile')
-try:
-    import scipy
-except ImportError:
-    issues.append('scipy')
-try:
-    import numpy
-except ImportError:
-    issues.append('numpy')
-try:
-    import yaml
-except ImportError:
-    issues.append('pyyaml')
-if issues:
-    print('missing:' + ','.join(issues))
-else:
-    print('ready')
-"#;
-
-    let output = std::process::Command::new(&python_str)
-        .arg("-c")
-        .arg(check_script)
-        .output()
-        .map_err(|e| format!("Failed to run Python: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-
-    if stdout.starts_with("ready") {
-        Ok(serde_json::json!({
-            "ready": true,
-            "pythonPath": python_str,
-        }))
-    } else if stdout.starts_with("missing:") {
-        let missing = stdout.strip_prefix("missing:").unwrap_or("");
-        Ok(serde_json::json!({
-            "ready": false,
-            "pythonPath": python_str,
-            "issue": format!("Missing packages: {}", missing),
-        }))
-    } else {
-        Ok(serde_json::json!({
-            "ready": false,
-            "pythonPath": python_str,
-            "issue": if stderr.is_empty() {
-                "Python check failed".to_string()
-            } else {
-                stderr
-            },
-        }))
-    }
-}
-
-#[tauri::command]
-pub async fn setup_python_environment(app: AppHandle) -> Result<String, String> {
-    let requirements = python_resolver::resolve_requirements(&app)?;
-    let requirements_str = requirements.to_string_lossy().to_string();
-
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-
-    let venv_dir = app_data.join("engine").join(".venv");
-
-    // Find system python3 for creating the venv
-    let system_python = if cfg!(target_os = "windows") {
-        "python"
-    } else {
-        "python3"
-    };
-
-    // Step 1: Create venv if it doesn't exist
-    if !venv_dir.exists() {
-        log::info!("Creating Python venv at: {}", venv_dir.display());
-
-        let output = std::process::Command::new(system_python)
-            .arg("-m")
-            .arg("venv")
-            .arg(&venv_dir)
-            .output()
-            .map_err(|e| format!("Failed to create venv: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Failed to create venv: {}", stderr));
-        }
-    }
-
-    // Step 2: Install requirements
-    let pip_path = if cfg!(target_os = "windows") {
-        venv_dir.join("Scripts").join("pip.exe")
-    } else {
-        venv_dir.join("bin").join("pip")
-    };
-
-    log::info!("Installing requirements from: {}", requirements_str);
-
-    let output = std::process::Command::new(&pip_path)
-        .arg("install")
-        .arg("-r")
-        .arg(&requirements_str)
-        .output()
-        .map_err(|e| format!("Failed to install requirements: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to install requirements: {}", stderr));
-    }
-
-    Ok("Python environment set up successfully".into())
+    Ok(serde_json::json!({
+        "device": "cpu",
+        "name": "ONNX Runtime",
+        "model_id": engine.current_model_id(),
+    }))
 }

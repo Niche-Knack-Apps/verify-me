@@ -10,20 +10,35 @@ const settings = useSettingsStore();
 const modelsStore = useModelsStore();
 
 onMounted(async () => {
-  // Load model catalog first so UI renders immediately
-  await modelsStore.loadModels();
+  try {
+    // Load model catalog first so UI renders immediately
+    console.log('[App] Loading model catalog...');
+    await modelsStore.loadModels();
+    console.log('[App] Models loaded:', modelsStore.models.map(m => `${m.id}(${m.status})`).join(', '));
 
-  if ('Capacitor' in window) {
-    // Extract bundled models if needed, then start engine
-    const hasBundled = modelsStore.models.some(m => m.status === 'bundled');
-    if (hasBundled) {
-      modelsStore.extractBundledModels().then(() => settings.startEngine());
+    if ('Capacitor' in window) {
+      // Android: Extract bundled models if needed, then start engine
+      const hasBundled = modelsStore.models.some(m => m.status === 'bundled');
+      if (hasBundled) {
+        console.log('[App] Bundled models found, extracting...');
+        try {
+          await modelsStore.extractBundledModels();
+          console.log('[App] Extraction complete, models:', modelsStore.models.map(m => `${m.id}(${m.status})`).join(', '));
+        } catch (e) {
+          console.error('[App] Extraction failed:', e);
+        }
+      }
+      console.log('[App] Starting engine...');
+      await settings.startEngine();
+      console.log('[App] Engine started:', settings.engineRunning ? 'running' : 'failed', settings.engineError ?? '');
     } else {
+      // Desktop: auto-start ONNX engine
+      console.log('[App] Starting ONNX engine...');
       await settings.startEngine();
     }
-  } else {
-    // Desktop: Python env check + engine start
-    await settings.initEngine();
+  } catch (e) {
+    console.error('[App] Startup failed:', e);
+    settings.engineError = e instanceof Error ? e.message : String(e);
   }
 });
 </script>
@@ -60,41 +75,11 @@ onMounted(async () => {
       </button>
     </nav>
 
-    <!-- Engine Offline Banner -->
-    <div v-if="!settings.engineRunning && !settings.engineStarting" class="engine-banner">
-      <span class="engine-banner-text">
-        {{ settings.isEighties ? '// ENGINE OFFLINE' : 'Engine is not running' }}
-      </span>
-      <button class="engine-banner-btn" @click="settings.startEngine()">
-        {{ settings.isEighties ? '[START ENGINE]' : 'Start Engine' }}
-      </button>
-    </div>
-
     <!-- Content -->
     <main class="content-area">
       <TTSTab v-if="settings.activeTab === 'tts'" />
       <VoiceCloneTab v-else />
     </main>
-
-    <!-- Footer -->
-    <footer
-      class="app-footer"
-      :class="{ 'app-footer--clickable': !settings.engineRunning }"
-      @click="!settings.engineRunning && (settings.showSettings = true)"
-    >
-      <span class="engine-status">
-        <template v-if="settings.isEighties">
-          <span class="status-indicator">{{ settings.engineRunning ? '[ONLINE]' : '[OFFLINE]' }}</span>
-          ENGINE: {{ settings.engineRunning ? 'RUNNING' : 'STOPPED' }}
-          // {{ settings.deviceType.toUpperCase() }}
-        </template>
-        <template v-else>
-          <span class="status-dot" :class="settings.engineRunning ? 'status-dot--on' : 'status-dot--off'" />
-          Engine: {{ settings.engineRunning ? 'Running' : 'Stopped' }}
-          <span class="device-badge">({{ settings.deviceType }})</span>
-        </template>
-      </span>
-    </footer>
 
     <!-- Settings Modal -->
     <SettingsModal v-if="settings.showSettings" @close="settings.showSettings = false" />
@@ -205,114 +190,10 @@ onMounted(async () => {
   text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
 }
 
-.engine-banner {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.75rem;
-  padding: 0.5rem 1rem;
-  background: rgba(234, 179, 8, 0.08);
-  border-bottom: 1px solid rgba(234, 179, 8, 0.3);
-  flex-shrink: 0;
-}
-
-[data-theme="eighties"] .engine-banner {
-  background: rgba(255, 200, 0, 0.05);
-  border-bottom-color: rgba(255, 200, 0, 0.3);
-}
-
-.engine-banner-text {
-  font-size: 0.8125rem;
-  color: var(--app-muted);
-}
-
-[data-theme="eighties"] .engine-banner-text {
-  font-size: 14px;
-  letter-spacing: 0.05em;
-}
-
-.engine-banner-btn {
-  font-family: var(--app-font);
-  font-size: 0.8125rem;
-  padding: 0.25rem 0.75rem;
-  background: var(--app-accent);
-  color: var(--app-bg);
-  border: none;
-  border-radius: var(--app-radius);
-  cursor: pointer;
-  transition: opacity 0.15s;
-}
-.engine-banner-btn:hover {
-  opacity: 0.85;
-}
-
-[data-theme="eighties"] .engine-banner-btn {
-  font-size: 14px;
-  border-radius: 0;
-  background: transparent;
-  color: var(--app-accent);
-  border: 1px solid var(--app-accent);
-}
-[data-theme="eighties"] .engine-banner-btn:hover {
-  text-shadow: 0 0 8px rgba(51, 255, 0, 0.6);
-  box-shadow: 0 0 8px rgba(51, 255, 0, 0.2);
-}
-
 .content-area {
   flex: 1;
   overflow-y: auto;
   padding: 1rem;
 }
 
-.app-footer {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0.5rem 1rem;
-  border-top: 1px solid var(--app-border);
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-
-.app-footer--clickable {
-  cursor: pointer;
-}
-.app-footer--clickable:hover {
-  background: var(--app-accent-hover-bg, rgba(99, 102, 241, 0.06));
-}
-
-.engine-status {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.8125rem;
-  color: var(--app-muted);
-}
-
-[data-theme="eighties"] .engine-status {
-  font-size: 16px;
-  letter-spacing: 0.05em;
-}
-
-.status-indicator {
-  color: var(--app-text);
-}
-
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.status-dot--on {
-  background: var(--app-success);
-  box-shadow: 0 0 6px var(--app-success);
-}
-.status-dot--off {
-  background: var(--app-muted);
-}
-
-.device-badge {
-  color: var(--app-muted);
-}
 </style>

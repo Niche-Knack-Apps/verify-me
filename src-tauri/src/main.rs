@@ -5,8 +5,36 @@ mod services;
 
 use commands::{engine, models, recording, tts};
 
+/// Set ORT_DYLIB_PATH if not already set, searching common locations.
+fn setup_ort_dylib_path() {
+    if std::env::var("ORT_DYLIB_PATH").is_ok() {
+        return;
+    }
+
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidates = [
+        // User-local install
+        format!("{}/.local/lib/onnxruntime/libonnxruntime.so", home),
+        // System-wide
+        "/usr/lib/libonnxruntime.so".to_string(),
+        "/usr/lib/x86_64-linux-gnu/libonnxruntime.so".to_string(),
+    ];
+
+    for candidate in &candidates {
+        let path = std::path::Path::new(candidate);
+        if path.exists() {
+            log::info!("Found ONNX Runtime at: {}", path.display());
+            std::env::set_var("ORT_DYLIB_PATH", path);
+            return;
+        }
+    }
+
+    log::warn!("ONNX Runtime library not found — set ORT_DYLIB_PATH manually");
+}
+
 fn main() {
     env_logger::init();
+    setup_ort_dylib_path();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -22,8 +50,6 @@ fn main() {
             engine::stop_engine,
             engine::engine_health,
             engine::get_device_info,
-            engine::check_python_environment,
-            engine::setup_python_environment,
             tts::generate_speech,
             tts::voice_clone,
             tts::get_voices,

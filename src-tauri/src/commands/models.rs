@@ -1,7 +1,5 @@
 use crate::services::path_service;
-use crate::services::python_resolver;
-use serde::Serialize;
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 struct StaticVoice {
@@ -151,13 +149,10 @@ struct DownloadProgress {
     percent: f32,
 }
 
-/// Check if a model exists in the given directory (as subdirectory or file with matching stem).
-/// For directories, validates that they contain at least one substantial file (>1KB)
-/// to avoid false positives from empty dirs or error files.
+/// Check if a model exists in the given directory.
 fn model_exists_in_dir(dir: &std::path::Path, model_id: &str) -> bool {
     let candidate = dir.join(model_id);
 
-    // Check for directory with actual model files
     if candidate.is_dir() {
         if let Ok(entries) = std::fs::read_dir(&candidate) {
             let has_real_files = entries.flatten().any(|e| {
@@ -168,14 +163,12 @@ fn model_exists_in_dir(dir: &std::path::Path, model_id: &str) -> bool {
         return false;
     }
 
-    // Check for exact file match (must be >1KB to be a real model)
     if candidate.is_file() {
         if let Ok(meta) = candidate.metadata() {
             return meta.len() > 1024;
         }
     }
 
-    // Check for files with matching stem (e.g., pocket-tts.onnx)
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -197,19 +190,17 @@ fn model_exists_in_dir(dir: &std::path::Path, model_id: &str) -> bool {
 
 #[tauri::command]
 pub async fn list_models(app: AppHandle) -> Result<Vec<ModelInfo>, String> {
-    let resource_dir = app.path().resource_dir().ok();
+    let resource_dir: Option<std::path::PathBuf> = app.path().resource_dir().ok();
     let app_data_models = path_service::get_models_dir().ok();
 
     let models = KNOWN_MODELS
         .iter()
         .map(|entry| {
-            // Bundled models are always available — shipped with the app
             let found = if entry.bundled {
                 true
             } else {
                 let mut on_disk = false;
 
-                // Check bundled resource dir
                 if let Some(ref res_dir) = resource_dir {
                     let bundled_dir = res_dir.join("models");
                     if bundled_dir.exists() && model_exists_in_dir(&bundled_dir, entry.id) {
@@ -217,7 +208,6 @@ pub async fn list_models(app: AppHandle) -> Result<Vec<ModelInfo>, String> {
                     }
                 }
 
-                // Check downloaded models in app_data_dir/models/
                 if !on_disk {
                     if let Some(ref models_dir) = app_data_models {
                         if model_exists_in_dir(models_dir, entry.id) {
@@ -310,123 +300,144 @@ pub async fn download_model(
     Ok(dest_path.to_string_lossy().into_owned())
 }
 
-/// Resolve the Python path for running download scripts.
-fn resolve_python_path(app: &AppHandle) -> Result<PathBuf, String> {
-    python_resolver::resolve_python(app)
+/// HuggingFace API file listing response
+#[derive(Deserialize)]
+struct HfFileInfo {
+    #[serde(rename = "rfilename")]
+    filename: String,
+    size: Option<u64>,
 }
 
-/// Resolve the path to the download_model.py script.
-fn resolve_download_script(app: &AppHandle) -> Result<PathBuf, String> {
-    python_resolver::resolve_download_script(app)
-}
-
-/// Download a single HuggingFace repo to a local directory.
-fn run_hf_download(
-    python_str: &str,
-    script_str: &str,
+/// Download all files from a HuggingFace repository using the API (pure Rust, no Python).
+async fn download_hf_repo(
+    client: &reqwest::Client,
     repo_id: &str,
     local_dir: &std::path::Path,
-    hf_token: &Option<String>,
+    token: &Option<String>,
     app: &AppHandle,
     progress_label: &str,
     progress_base: f32,
     progress_span: f32,
-) -> Result<String, String> {
-    use std::io::BufRead;
-    use std::process::Stdio;
+) -> Result<(), String> {
+    std::fs::create_dir_all(local_dir)
+        .map_err(|e| format!("Failed to create dir: {}", e))?;
 
-    let args_json = serde_json::json!({
-        "repo_id": repo_id,
-        "local_dir": local_dir.to_string_lossy(),
-    })
-    .to_string();
+    // List files in the repo via HF API
+    let api_url = format!("https://huggingface.co/api/models/{}", repo_id);
+    let mut req = client.get(&api_url);
+    if let Some(ref tok) = token {
+        if !tok.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", tok));
+        }
+    }
 
+    let resp = req.send().await.map_err(|e| format!("HF API error: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HF API returned status {}", resp.status()));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse HF API response: {}", e))?;
+
+    let siblings = body["siblings"]
+        .as_array()
+        .ok_or("No files found in HF repo")?;
+
+    let files: Vec<HfFileInfo> = siblings
+        .iter()
+        .filter_map(|s| serde_json::from_value(s.clone()).ok())
+        .collect();
+
+    let total_files = files.len() as f32;
     log::info!(
-        "Starting HF download: {} -> {}",
+        "Downloading {} files from {} -> {}",
+        files.len(),
         repo_id,
         local_dir.display()
     );
 
-    let mut cmd = std::process::Command::new(python_str);
-    cmd.arg(script_str)
-        .arg(&args_json)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+    for (i, file_info) in files.iter().enumerate() {
+        let file_url = format!(
+            "https://huggingface.co/{}/resolve/main/{}",
+            repo_id, file_info.filename
+        );
 
-    if let Some(ref tok) = hf_token {
-        if !tok.is_empty() {
-            cmd.env("HF_TOKEN", tok);
+        let dest_path = local_dir.join(&file_info.filename);
+
+        // Create parent directories for nested files
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create dir: {}", e))?;
         }
-    }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to start download process: {}", e))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("Failed to capture download stdout")?;
-    let reader = std::io::BufReader::new(stdout);
-
-    let mut final_path = String::new();
-
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("Read error: {}", e))?;
-        log::debug!("Download output: {}", line);
-
-        if let Ok(status) = serde_json::from_str::<serde_json::Value>(&line) {
-            let status_str = status["status"].as_str().unwrap_or("");
-
-            match status_str {
-                "downloading" => {
-                    let _ = app.emit(
-                        "model-download-progress",
-                        DownloadProgress {
-                            filename: progress_label.to_string(),
-                            downloaded: 0,
-                            total: None,
-                            percent: progress_base + 5.0,
-                        },
-                    );
+        // Skip if already downloaded and same size
+        if dest_path.exists() {
+            if let (Some(expected), Ok(meta)) = (file_info.size, dest_path.metadata()) {
+                if meta.len() == expected {
+                    log::debug!("Skipping {} (already exists)", file_info.filename);
+                    continue;
                 }
-                "complete" => {
-                    final_path = status["path"].as_str().unwrap_or("").to_string();
-                    let _ = app.emit(
-                        "model-download-progress",
-                        DownloadProgress {
-                            filename: progress_label.to_string(),
-                            downloaded: 1,
-                            total: Some(1),
-                            percent: progress_base + progress_span,
-                        },
-                    );
-                }
-                "error" => {
-                    let msg = status["message"]
-                        .as_str()
-                        .unwrap_or("Unknown download error");
-                    return Err(format!("Download failed: {}", msg));
-                }
-                _ => {}
             }
         }
+
+        log::info!("Downloading: {}", file_info.filename);
+
+        let mut req = client.get(&file_url);
+        if let Some(ref tok) = token {
+            if !tok.is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", tok));
+            }
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("Download error for {}: {}", file_info.filename, e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!(
+                "Download failed for {}: status {}",
+                file_info.filename,
+                resp.status()
+            ));
+        }
+
+        let total_bytes = resp.content_length();
+        let mut downloaded_bytes: u64 = 0;
+        let mut stream = resp.bytes_stream();
+        let mut file = std::fs::File::create(&dest_path)
+            .map_err(|e| format!("Failed to create {}: {}", file_info.filename, e))?;
+
+        use futures_util::StreamExt;
+        use std::io::Write;
+
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(|e| format!("Stream error for {}: {}", file_info.filename, e))?;
+            file.write_all(&chunk)
+                .map_err(|e| format!("Write error for {}: {}", file_info.filename, e))?;
+            downloaded_bytes += chunk.len() as u64;
+        }
+
+        // Emit progress
+        let file_progress = (i as f32 + 1.0) / total_files;
+        let _ = app.emit(
+            "model-download-progress",
+            DownloadProgress {
+                filename: progress_label.to_string(),
+                downloaded: downloaded_bytes,
+                total: total_bytes,
+                percent: progress_base + progress_span * file_progress,
+            },
+        );
     }
 
-    let exit_status = child.wait().map_err(|e| format!("Wait error: {}", e))?;
-    if !exit_status.success() {
-        return Err("Download process exited with error".to_string());
-    }
-
-    if final_path.is_empty() {
-        return Err("Download did not return a model path".to_string());
-    }
-
-    Ok(final_path)
+    Ok(())
 }
 
 /// Additional HF repos to download alongside a model.
-/// Maps model_id -> list of (repo_id, local_subdir).
 static COMPANION_DOWNLOADS: &[(&str, &str, &str)] = &[
     (
         "qwen3-tts",
@@ -458,10 +469,7 @@ pub async fn download_hf_model(
         }
     }
 
-    let python_path = resolve_python_path(&app)?;
-    let script_path = resolve_download_script(&app)?;
-    let python_str = python_path.to_string_lossy().to_string();
-    let script_str = script_path.to_string_lossy().to_string();
+    let client = reqwest::Client::new();
 
     // Determine how many downloads we need
     let companions: Vec<_> = COMPANION_DOWNLOADS
@@ -481,67 +489,57 @@ pub async fn download_hf_model(
         },
     );
 
-    let app_clone = app.clone();
-    let model_id_clone = model_id.clone();
-    let models_dir_clone = models_dir.clone();
+    // Download primary model
+    download_hf_repo(
+        &client,
+        &repo_id,
+        &local_dir,
+        &token,
+        &app,
+        &model_id,
+        0.0,
+        span_per,
+    )
+    .await?;
 
-    let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-        // Download primary model
-        let primary_path = run_hf_download(
-            &python_str,
-            &script_str,
-            &repo_id,
-            &local_dir,
-            &token,
-            &app_clone,
-            &model_id_clone,
-            0.0,
-            span_per,
-        )?;
+    // Download companion models
+    for (i, (_, companion_repo, companion_subdir)) in companions.iter().enumerate() {
+        let companion_dir = models_dir.join(companion_subdir);
+        let already_exists = companion_dir.exists()
+            && companion_dir.is_dir()
+            && std::fs::read_dir(&companion_dir)
+                .map(|e| e.count() > 2)
+                .unwrap_or(false);
 
-        // Download companion models (e.g., Base model for voice cloning)
-        for (i, (_, companion_repo, companion_subdir)) in companions.iter().enumerate() {
-            let companion_dir = models_dir_clone.join(companion_subdir);
-            let already_exists = companion_dir.exists()
-                && companion_dir.is_dir()
-                && std::fs::read_dir(&companion_dir)
-                    .map(|e| e.count() > 2)
-                    .unwrap_or(false);
-
-            if already_exists {
-                log::info!(
-                    "Companion model {} already exists, skipping",
-                    companion_subdir
-                );
-                continue;
-            }
-
+        if already_exists {
             log::info!(
-                "Downloading companion model: {} -> {}",
-                companion_repo,
-                companion_dir.display()
+                "Companion model {} already exists, skipping",
+                companion_subdir
             );
-            let base_pct = span_per * (i + 1) as f32;
-            run_hf_download(
-                &python_str,
-                &script_str,
-                companion_repo,
-                &companion_dir,
-                &token,
-                &app_clone,
-                &model_id_clone,
-                base_pct,
-                span_per,
-            )?;
+            continue;
         }
 
-        Ok(primary_path)
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))??;
+        log::info!(
+            "Downloading companion model: {} -> {}",
+            companion_repo,
+            companion_dir.display()
+        );
+        let base_pct = span_per * (i + 1) as f32;
+        download_hf_repo(
+            &client,
+            companion_repo,
+            &companion_dir,
+            &token,
+            &app,
+            &model_id,
+            base_pct,
+            span_per,
+        )
+        .await?;
+    }
 
-    log::info!("HF model download complete: {}", result);
-    Ok(result)
+    log::info!("HF model download complete: {}", model_id);
+    Ok(local_dir.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -549,7 +547,6 @@ pub async fn delete_model(model_id: String) -> Result<(), String> {
     let models_dir = path_service::get_models_dir()?;
     let model_path = models_dir.join(&model_id);
 
-    // Check for directory matching model_id
     if model_path.is_dir() {
         std::fs::remove_dir_all(&model_path)
             .map_err(|e| format!("Failed to delete model: {}", e))?;
@@ -557,14 +554,12 @@ pub async fn delete_model(model_id: String) -> Result<(), String> {
         return Ok(());
     }
 
-    // Check for exact file match
     if model_path.is_file() {
         std::fs::remove_file(&model_path).map_err(|e| format!("Failed to delete model: {}", e))?;
         log::info!("Deleted model: {}", model_id);
         return Ok(());
     }
 
-    // Check for file with matching stem (e.g., qwen3-tts.safetensors)
     let entries = std::fs::read_dir(&models_dir)
         .map_err(|e| format!("Failed to read models directory: {}", e))?;
 

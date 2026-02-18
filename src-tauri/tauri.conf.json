@@ -39,10 +39,7 @@
     ],
     "resources": {
       "resources/models/pocket-tts/*": "models/pocket-tts/",
-      "resources/models/pocket-tts/embeddings_v2/*": "models/pocket-tts/embeddings_v2/",
-      "../engine/*.py": "engine/",
-      "../engine/models/*.py": "engine/models/",
-      "../engine/requirements.txt": "engine/requirements.txt"
+      "resources/models/pocket-tts/embeddings_v2/*": "models/pocket-tts/embeddings_v2/"
     },
     "linux": {
       "appimage": {

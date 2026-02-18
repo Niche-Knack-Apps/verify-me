@@ -40,7 +40,7 @@ onMounted(() => {
         v-for="model in filteredModels"
         :key="model.id"
         class="model-item"
-        :class="{ selected: modelValue === model.id, disabled: model.status === 'downloading' || modelsStore.downloading === model.id }"
+        :class="{ selected: modelValue === model.id, disabled: model.status === 'downloading' || model.status === 'extracting' || model.status === 'bundled' || modelsStore.downloading === model.id }"
         @click="model.status === 'available' && modelsStore.downloading !== model.id && emit('update:modelValue', model.id)"
       >
         <div class="model-info">
@@ -54,9 +54,17 @@ onMounted(() => {
         <span v-if="model.status === 'downloading' || modelsStore.downloading === model.id" class="download-progress">
           {{ Math.round(modelsStore.downloadProgress[model.id] ?? 0) }}%
         </span>
-        <span v-else-if="model.status === 'extracting' || model.status === 'bundled'" class="download-progress">
-          {{ settings.isEighties ? 'SETUP...' : 'Setting up...' }}
+        <span v-else-if="model.status === 'extracting'" class="download-progress">
+          {{ settings.isEighties ? 'EXTRACTING...' : 'Extracting...' }}
         </span>
+        <button
+          v-else-if="model.status === 'bundled'"
+          class="download-btn"
+          @click.stop="modelsStore.extractBundledModels()"
+          title="Extract bundled model"
+        >
+          {{ settings.isEighties ? '[EXTRACT]' : 'Extract' }}
+        </button>
         <span v-else-if="model.status === 'available'" class="model-status">
           {{ settings.isEighties ? 'READY' : 'Ready' }}
         </span>
