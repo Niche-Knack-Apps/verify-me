@@ -7,6 +7,7 @@ engine/__pycache__/
 engine/.venv/
 *.pyc
 src-tauri/resources/models/pocket-tts/
+android/app/src/main/assets/models/
 src-tauri/resources/models/*.safetensors
 .env
 .DS_Store

@@ -23,7 +23,7 @@ export interface TTSModel {
   id: string;
   name: string;
   size: string;
-  status: 'available' | 'downloadable' | 'bundled' | 'extracting';
+  status: 'available' | 'downloadable' | 'bundled' | 'extracting' | 'downloading';
   supportsClone: boolean;
   supportsVoicePrompt: boolean;
   supportsVoiceDesign: boolean;
@@ -36,6 +36,8 @@ export const useModelsStore = defineStore('models', () => {
   const models = ref<TTSModel[]>([]);
   const downloadProgress = ref<Record<string, number>>({});
   const downloading = ref<string | null>(null);
+  const downloadErrors = ref<Record<string, string>>({});
+  const downloadFilename = ref<Record<string, string>>({});
 
   async function loadModels() {
     try {
@@ -91,6 +93,10 @@ export const useModelsStore = defineStore('models', () => {
     try {
       downloading.value = modelId;
       downloadProgress.value[modelId] = 0;
+      delete downloadErrors.value[modelId];
+      models.value = models.value.map(m =>
+        m.id === modelId ? { ...m, status: 'downloading' as const } : m
+      );
 
       if (isCapacitor()) {
         const ModelManager = await getModelManager();
@@ -119,9 +125,31 @@ export const useModelsStore = defineStore('models', () => {
       await loadModels();
     } catch (e) {
       delete downloadProgress.value[modelId];
+      delete downloadFilename.value[modelId];
       downloading.value = null;
+      downloadErrors.value[modelId] = String(e);
+      models.value = models.value.map(m =>
+        m.id === modelId ? { ...m, status: 'downloadable' as const } : m
+      );
       console.error('Failed to download model:', e);
       throw e;
+    }
+  }
+
+  async function cancelDownload(modelId: string) {
+    try {
+      if (isCapacitor()) {
+        const ModelManager = await getModelManager();
+        await ModelManager.cancelDownload();
+      }
+      delete downloadProgress.value[modelId];
+      delete downloadFilename.value[modelId];
+      downloading.value = null;
+      models.value = models.value.map(m =>
+        m.id === modelId ? { ...m, status: 'downloadable' as const } : m
+      );
+    } catch (e) {
+      console.error('Failed to cancel download:', e);
     }
   }
 
@@ -147,6 +175,9 @@ export const useModelsStore = defineStore('models', () => {
         await ModelManager.addListener('model-download-progress',
           (data: { modelId: string; filename: string; percent: number }) => {
             downloadProgress.value[data.modelId] = data.percent;
+            if (data.filename) {
+              downloadFilename.value[data.modelId] = data.filename;
+            }
           }
         );
         await ModelManager.addListener('model-extracted',
@@ -174,9 +205,12 @@ export const useModelsStore = defineStore('models', () => {
     models,
     downloadProgress,
     downloading,
+    downloadErrors,
+    downloadFilename,
     loadModels,
     extractBundledModels,
     downloadModel,
+    cancelDownload,
     deleteModel,
   };
 });

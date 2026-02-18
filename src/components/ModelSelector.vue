@@ -40,7 +40,7 @@ onMounted(() => {
         v-for="model in filteredModels"
         :key="model.id"
         class="model-item"
-        :class="{ selected: modelValue === model.id, disabled: modelsStore.downloading === model.id }"
+        :class="{ selected: modelValue === model.id, disabled: model.status === 'downloading' || modelsStore.downloading === model.id }"
         @click="model.status === 'available' && modelsStore.downloading !== model.id && emit('update:modelValue', model.id)"
       >
         <div class="model-info">
@@ -51,7 +51,7 @@ onMounted(() => {
           <span class="model-name">{{ model.name }}</span>
           <span class="model-size">{{ model.size }}</span>
         </div>
-        <span v-if="modelsStore.downloading === model.id" class="download-progress">
+        <span v-if="model.status === 'downloading' || modelsStore.downloading === model.id" class="download-progress">
           {{ Math.round(modelsStore.downloadProgress[model.id] ?? 0) }}%
         </span>
         <span v-else-if="model.status === 'extracting' || model.status === 'bundled'" class="download-progress">

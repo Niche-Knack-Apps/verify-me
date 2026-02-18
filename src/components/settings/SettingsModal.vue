@@ -16,7 +16,10 @@ const emit = defineEmits<{
 const settings = useSettingsStore();
 const modelsStore = useModelsStore();
 const downloadError = ref<string | null>(null);
+const showLargeDownloadConfirm = ref<string | null>(null);
 const isAndroid = 'Capacitor' in window;
+
+const LARGE_DOWNLOAD_THRESHOLD_MB = 1024;
 
 async function openModelsDirectory() {
   try {
@@ -27,8 +30,25 @@ async function openModelsDirectory() {
   }
 }
 
+function parseSizeMB(size: string): number {
+  const match = size.match(/([\d.]+)\s*(GB|MB)/i);
+  if (!match) return 0;
+  const val = parseFloat(match[1]);
+  return match[2].toUpperCase() === 'GB' ? val * 1024 : val;
+}
+
 async function handleDownload(modelId: string) {
+  const model = modelsStore.models.find(m => m.id === modelId);
+  if (isAndroid && model && parseSizeMB(model.size) >= LARGE_DOWNLOAD_THRESHOLD_MB) {
+    showLargeDownloadConfirm.value = modelId;
+    return;
+  }
+  await startDownload(modelId);
+}
+
+async function startDownload(modelId: string) {
   downloadError.value = null;
+  showLargeDownloadConfirm.value = null;
   try {
     await modelsStore.downloadModel(modelId, settings.hfToken || undefined);
   } catch (e) {
@@ -130,12 +150,12 @@ onMounted(() => {
                   <span class="model-entry-info">
                     <template v-if="settings.isEighties">
                       <span v-if="model.status === 'available'" class="status-ready">[*]</span>
-                      <span v-else-if="model.status === 'extracting'" class="status-ready">[~]</span>
+                      <span v-else-if="model.status === 'extracting' || model.status === 'downloading'" class="status-ready">[~]</span>
                       <span v-else class="status-missing">[ ]</span>
                     </template>
                     <template v-else>
                       <span v-if="model.status === 'available'" class="status-dot status-dot--ready" />
-                      <span v-else-if="model.status === 'extracting'" class="status-dot status-dot--ready" style="opacity:0.5" />
+                      <span v-else-if="model.status === 'extracting' || model.status === 'downloading'" class="status-dot status-dot--ready" style="opacity:0.5" />
                       <span v-else class="status-dot status-dot--missing" />
                     </template>
                     <span :class="model.status === 'available' ? 'text-ready' : 'text-missing'">
@@ -144,7 +164,7 @@ onMounted(() => {
                   </span>
                   <div class="model-entry-actions">
                     <!-- Download progress -->
-                    <div v-if="modelsStore.downloading === model.id" class="download-status">
+                    <div v-if="modelsStore.downloading === model.id || model.status === 'downloading'" class="download-status">
                       <template v-if="settings.isEighties">
                         <span class="download-bar">
                           {{ '\u2588'.repeat(Math.round((modelsStore.downloadProgress[model.id] ?? 0) / 5)) }}{{ '\u2591'.repeat(20 - Math.round((modelsStore.downloadProgress[model.id] ?? 0) / 5)) }}
@@ -156,6 +176,13 @@ onMounted(() => {
                         </div>
                       </template>
                       <span class="download-pct">{{ Math.round(modelsStore.downloadProgress[model.id] ?? 0) }}%</span>
+                      <button
+                        v-if="isAndroid"
+                        class="action-link action-link--danger cancel-btn"
+                        @click="modelsStore.cancelDownload(model.id)"
+                      >
+                        {{ settings.isEighties ? '[X]' : 'Cancel' }}
+                      </button>
                     </div>
                     <!-- Extracting -->
                     <span v-else-if="model.status === 'extracting' || model.status === 'bundled'" class="action-link" style="cursor:default;opacity:0.7">
@@ -178,6 +205,17 @@ onMounted(() => {
                       {{ settings.isEighties ? '[DEL]' : 'Delete' }}
                     </button>
                   </div>
+                  <!-- Download filename -->
+                  <div v-if="(modelsStore.downloading === model.id || model.status === 'downloading') && modelsStore.downloadFilename[model.id]" class="download-filename">
+                    {{ modelsStore.downloadFilename[model.id] }}
+                  </div>
+                  <!-- Per-model download error with retry -->
+                  <div v-if="modelsStore.downloadErrors[model.id]" class="download-error-inline">
+                    <span>{{ settings.isEighties ? `ERROR: ${modelsStore.downloadErrors[model.id]}` : modelsStore.downloadErrors[model.id] }}</span>
+                    <button class="action-link" @click="handleDownload(model.id)">
+                      {{ settings.isEighties ? '[RETRY]' : 'Retry' }}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -185,6 +223,24 @@ onMounted(() => {
             <p v-if="downloadError" class="download-error">
               {{ settings.isEighties ? `ERROR: ${downloadError}` : downloadError }}
             </p>
+
+            <!-- Large download confirmation -->
+            <div v-if="showLargeDownloadConfirm" class="large-download-warning">
+              <p class="large-download-text">
+                {{ settings.isEighties
+                  ? '// WARNING: LARGE DOWNLOAD. USE WIFI.'
+                  : 'This model is over 1 GB. Downloading on mobile data may incur charges.'
+                }}
+              </p>
+              <div class="large-download-actions">
+                <Button variant="primary" size="sm" @click="startDownload(showLargeDownloadConfirm)">
+                  {{ settings.isEighties ? '[PROCEED]' : 'Download anyway' }}
+                </Button>
+                <Button variant="secondary" size="sm" @click="showLargeDownloadConfirm = null">
+                  {{ settings.isEighties ? '[CANCEL]' : 'Cancel' }}
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -488,6 +544,7 @@ onMounted(() => {
 
 .model-entry {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   padding: 0.375rem 0.5rem;
@@ -739,6 +796,67 @@ onMounted(() => {
 
 [data-theme="eighties"] .python-warning-text {
   font-size: 14px;
+}
+
+.cancel-btn {
+  margin-left: 0.25rem;
+}
+
+.download-filename {
+  width: 100%;
+  font-size: 0.6875rem;
+  color: var(--app-muted);
+  padding: 0.125rem 0.5rem 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-theme="eighties"] .download-filename {
+  font-size: 12px;
+}
+
+.download-error-inline {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--app-error);
+  padding: 0.25rem 0.5rem 0;
+}
+
+[data-theme="eighties"] .download-error-inline {
+  font-size: 12px;
+}
+
+.large-download-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px solid rgba(234, 179, 8, 0.3);
+  border-radius: var(--app-radius);
+}
+
+[data-theme="eighties"] .large-download-warning {
+  border-radius: 0;
+}
+
+.large-download-text {
+  font-size: 0.8125rem;
+  color: var(--app-muted);
+}
+
+[data-theme="eighties"] .large-download-text {
+  font-size: 14px;
+}
+
+.large-download-actions {
+  display: flex;
+  gap: 0.5rem;
 }
 
 .modal-footer {
