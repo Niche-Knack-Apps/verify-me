@@ -10,8 +10,21 @@ const settings = useSettingsStore();
 const modelsStore = useModelsStore();
 
 onMounted(async () => {
-  await settings.initEngine();
+  // Load model catalog first so UI renders immediately
   await modelsStore.loadModels();
+
+  if ('Capacitor' in window) {
+    // Extract bundled models if needed, then start engine
+    const hasBundled = modelsStore.models.some(m => m.status === 'bundled');
+    if (hasBundled) {
+      modelsStore.extractBundledModels().then(() => settings.startEngine());
+    } else {
+      await settings.startEngine();
+    }
+  } else {
+    // Desktop: Python env check + engine start
+    await settings.initEngine();
+  }
 });
 </script>
 

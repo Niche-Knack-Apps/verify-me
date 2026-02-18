@@ -16,6 +16,7 @@ const emit = defineEmits<{
 const settings = useSettingsStore();
 const modelsStore = useModelsStore();
 const downloadError = ref<string | null>(null);
+const isAndroid = 'Capacitor' in window;
 
 async function openModelsDirectory() {
   try {
@@ -81,7 +82,7 @@ onMounted(() => {
             {{ settings.isEighties ? '// MODELS' : 'Models' }}
           </h3>
           <div class="config-items">
-            <div>
+            <div v-if="!isAndroid">
               <label class="config-label">Models Directory</label>
               <div class="dir-row">
                 <div class="dir-display">
@@ -129,10 +130,12 @@ onMounted(() => {
                   <span class="model-entry-info">
                     <template v-if="settings.isEighties">
                       <span v-if="model.status === 'available'" class="status-ready">[*]</span>
+                      <span v-else-if="model.status === 'extracting'" class="status-ready">[~]</span>
                       <span v-else class="status-missing">[ ]</span>
                     </template>
                     <template v-else>
                       <span v-if="model.status === 'available'" class="status-dot status-dot--ready" />
+                      <span v-else-if="model.status === 'extracting'" class="status-dot status-dot--ready" style="opacity:0.5" />
                       <span v-else class="status-dot status-dot--missing" />
                     </template>
                     <span :class="model.status === 'available' ? 'text-ready' : 'text-missing'">
@@ -154,6 +157,10 @@ onMounted(() => {
                       </template>
                       <span class="download-pct">{{ Math.round(modelsStore.downloadProgress[model.id] ?? 0) }}%</span>
                     </div>
+                    <!-- Extracting -->
+                    <span v-else-if="model.status === 'extracting' || model.status === 'bundled'" class="action-link" style="cursor:default;opacity:0.7">
+                      {{ settings.isEighties ? '[SETUP...]' : 'Setting up...' }}
+                    </span>
                     <!-- Download button -->
                     <button
                       v-else-if="model.status === 'downloadable'"

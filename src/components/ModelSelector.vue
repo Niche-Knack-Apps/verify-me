@@ -54,6 +54,9 @@ onMounted(() => {
         <span v-if="modelsStore.downloading === model.id" class="download-progress">
           {{ Math.round(modelsStore.downloadProgress[model.id] ?? 0) }}%
         </span>
+        <span v-else-if="model.status === 'extracting' || model.status === 'bundled'" class="download-progress">
+          {{ settings.isEighties ? 'SETUP...' : 'Setting up...' }}
+        </span>
         <span v-else-if="model.status === 'available'" class="model-status">
           {{ settings.isEighties ? 'READY' : 'Ready' }}
         </span>

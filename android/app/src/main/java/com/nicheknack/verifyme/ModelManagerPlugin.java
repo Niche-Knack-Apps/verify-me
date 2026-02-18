@@ -104,9 +104,7 @@ public class ModelManagerPlugin extends Plugin {
 
     @PluginMethod
     public void listModels(PluginCall call) {
-        // Auto-extract bundled pocket-tts on first access
-        extractBundledModelsIfNeeded();
-
+        // No extraction here — return the catalog instantly
         File modelsDir = getModelsDir();
         JSArray result = new JSArray();
 
@@ -120,7 +118,13 @@ public class ModelManagerPlugin extends Plugin {
             model.put("supportsVoiceDesign", entry.supportsVoiceDesign);
 
             boolean available = isModelDownloaded(modelsDir, entry);
-            model.put("status", available ? "available" : "downloadable");
+            if (available) {
+                model.put("status", "available");
+            } else if (entry.bundled) {
+                model.put("status", "bundled");
+            } else {
+                model.put("status", "downloadable");
+            }
 
             JSArray voices = new JSArray();
             for (String[] voice : entry.voices) {
@@ -144,6 +148,28 @@ public class ModelManagerPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void extractBundledModels(PluginCall call) {
+        executor.submit(() -> {
+            try {
+                for (ModelEntry entry : KNOWN_MODELS) {
+                    if (!entry.bundled) continue;
+                    if (isModelDownloaded(getModelsDir(), entry)) continue;
+                    extractBundledModel(entry);
+                    JSObject data = new JSObject();
+                    data.put("modelId", entry.id);
+                    data.put("status", "available");
+                    notifyListeners("model-extracted", data);
+                }
+                JSObject ret = new JSObject();
+                ret.put("success", true);
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject("Extraction failed: " + e.getMessage());
+            }
+        });
+    }
+
+    @PluginMethod
     public void downloadModel(PluginCall call) {
         String modelId = call.getString("modelId");
         String hfToken = call.getString("hfToken", null);
@@ -164,6 +190,10 @@ public class ModelManagerPlugin extends Plugin {
             executor.submit(() -> {
                 try {
                     extractBundledModel(entry);
+                    JSObject data = new JSObject();
+                    data.put("modelId", modelId);
+                    data.put("status", "available");
+                    notifyListeners("model-extracted", data);
                     JSObject ret = new JSObject();
                     ret.put("success", true);
                     ret.put("modelId", modelId);

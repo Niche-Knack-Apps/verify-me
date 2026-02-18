@@ -33,6 +33,7 @@ export const useTTSStore = defineStore('tts', () => {
   const outputAudioPath = ref<string | null>(null);
   const isGenerating = ref(false);
   const error = ref<string | null>(null);
+  const initializedModelId = ref<string | null>(null);
 
   // Voice clone state
   const referenceAudioPath = ref<string | null>(null);
@@ -185,6 +186,20 @@ export const useTTSStore = defineStore('tts', () => {
     }
   }
 
+  // ── Engine auto-init (Android) ──────────────────────────────
+
+  async function ensureEngineInitialized() {
+    if (!isCapacitor()) return;
+    if (initializedModelId.value === selectedModelId.value) return;
+    const TTSEngine = await getTTSEngine();
+    const result = await TTSEngine.initialize({ modelId: selectedModelId.value });
+    if (result.success) {
+      initializedModelId.value = selectedModelId.value;
+    } else {
+      throw new Error(result.error ?? 'Failed to initialize engine');
+    }
+  }
+
   // ── TTS generation ──────────────────────────────────────────
 
   async function generateSpeech() {
@@ -193,6 +208,7 @@ export const useTTSStore = defineStore('tts', () => {
     error.value = null;
     try {
       if (isCapacitor()) {
+        await ensureEngineInitialized();
         const TTSEngine = await getTTSEngine();
         const result = await TTSEngine.generateSpeech({
           text: text.value,
@@ -251,6 +267,7 @@ export const useTTSStore = defineStore('tts', () => {
     error.value = null;
     try {
       if (isCapacitor()) {
+        await ensureEngineInitialized();
         const TTSEngine = await getTTSEngine();
         const result = await TTSEngine.cloneVoice({
           text: text.value,

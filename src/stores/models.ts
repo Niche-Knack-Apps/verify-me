@@ -23,7 +23,7 @@ export interface TTSModel {
   id: string;
   name: string;
   size: string;
-  status: 'available' | 'downloadable';
+  status: 'available' | 'downloadable' | 'bundled' | 'extracting';
   supportsClone: boolean;
   supportsVoicePrompt: boolean;
   supportsVoiceDesign: boolean;
@@ -62,6 +62,23 @@ export const useModelsStore = defineStore('models', () => {
     } catch (e) {
       console.error('Failed to load models:', e);
     }
+  }
+
+  async function extractBundledModels() {
+    if (!isCapacitor()) return;
+    models.value = models.value.map(m =>
+      m.status === 'bundled' ? { ...m, status: 'extracting' as const } : m
+    );
+    try {
+      const ModelManager = await getModelManager();
+      await ModelManager.extractBundledModels();
+    } catch (e) {
+      console.error('Bundled extraction failed:', e);
+      models.value = models.value.map(m =>
+        m.status === 'extracting' ? { ...m, status: 'bundled' as const } : m
+      );
+    }
+    await loadModels();
   }
 
   async function downloadModel(modelId: string, hfToken?: string) {
@@ -132,6 +149,14 @@ export const useModelsStore = defineStore('models', () => {
             downloadProgress.value[data.modelId] = data.percent;
           }
         );
+        await ModelManager.addListener('model-extracted',
+          (data: { modelId: string; status: string }) => {
+            const idx = models.value.findIndex(m => m.id === data.modelId);
+            if (idx !== -1) {
+              models.value[idx] = { ...models.value[idx], status: 'available' };
+            }
+          }
+        );
       } else {
         const { listen } = await import('@tauri-apps/api/event');
         await listen<{ filename: string; percent: number }>('model-download-progress', (event) => {
@@ -150,6 +175,7 @@ export const useModelsStore = defineStore('models', () => {
     downloadProgress,
     downloading,
     loadModels,
+    extractBundledModels,
     downloadModel,
     deleteModel,
   };
