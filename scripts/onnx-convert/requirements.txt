@@ -1,0 +1,16 @@
+# ONNX conversion dependencies for Verify Me TTS models
+# Install: pip install -r requirements.txt
+
+torch>=2.1.0
+transformers>=4.57.0
+onnx>=1.15.0
+onnxruntime>=1.17.0
+optimum>=1.17.0
+safetensors>=0.4.0
+numpy>=1.24.0
+scipy>=1.11.0
+soundfile>=0.12.0
+
+# Required by qwen_tts model loading
+librosa>=0.10.0
+qwen-tts>=0.1.0

@@ -3,13 +3,18 @@ dist/
 src-tauri/target/
 android/app/build/
 android/.gradle/
+android/local.properties
+android/capacitor-cordova-android-plugins/
+android/app/src/main/assets/public/
 engine/__pycache__/
 engine/.venv/
 *.pyc
-src-tauri/resources/models/pocket-tts/
-android/app/src/main/assets/models/
-src-tauri/resources/models/*.safetensors
+__pycache__/
 .env
 .DS_Store
 .ruff_cache/
 *.log
+packaging/flatpak/.flatpak-builder/
+.claude/settings.local.json
+# Incomplete ONNX conversions (tracked separately when complete)
+resources/onnx-models/
