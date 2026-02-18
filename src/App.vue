@@ -47,6 +47,16 @@ onMounted(async () => {
       </button>
     </nav>
 
+    <!-- Engine Offline Banner -->
+    <div v-if="!settings.engineRunning && !settings.engineStarting" class="engine-banner">
+      <span class="engine-banner-text">
+        {{ settings.isEighties ? '// ENGINE OFFLINE' : 'Engine is not running' }}
+      </span>
+      <button class="engine-banner-btn" @click="settings.startEngine()">
+        {{ settings.isEighties ? '[START ENGINE]' : 'Start Engine' }}
+      </button>
+    </div>
+
     <!-- Content -->
     <main class="content-area">
       <TTSTab v-if="settings.activeTab === 'tts'" />
@@ -54,7 +64,11 @@ onMounted(async () => {
     </main>
 
     <!-- Footer -->
-    <footer class="app-footer">
+    <footer
+      class="app-footer"
+      :class="{ 'app-footer--clickable': !settings.engineRunning }"
+      @click="!settings.engineRunning && (settings.showSettings = true)"
+    >
       <span class="engine-status">
         <template v-if="settings.isEighties">
           <span class="status-indicator">{{ settings.engineRunning ? '[ONLINE]' : '[OFFLINE]' }}</span>
@@ -178,6 +192,59 @@ onMounted(async () => {
   text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
 }
 
+.engine-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+  background: rgba(234, 179, 8, 0.08);
+  border-bottom: 1px solid rgba(234, 179, 8, 0.3);
+  flex-shrink: 0;
+}
+
+[data-theme="eighties"] .engine-banner {
+  background: rgba(255, 200, 0, 0.05);
+  border-bottom-color: rgba(255, 200, 0, 0.3);
+}
+
+.engine-banner-text {
+  font-size: 0.8125rem;
+  color: var(--app-muted);
+}
+
+[data-theme="eighties"] .engine-banner-text {
+  font-size: 14px;
+  letter-spacing: 0.05em;
+}
+
+.engine-banner-btn {
+  font-family: var(--app-font);
+  font-size: 0.8125rem;
+  padding: 0.25rem 0.75rem;
+  background: var(--app-accent);
+  color: var(--app-bg);
+  border: none;
+  border-radius: var(--app-radius);
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.engine-banner-btn:hover {
+  opacity: 0.85;
+}
+
+[data-theme="eighties"] .engine-banner-btn {
+  font-size: 14px;
+  border-radius: 0;
+  background: transparent;
+  color: var(--app-accent);
+  border: 1px solid var(--app-accent);
+}
+[data-theme="eighties"] .engine-banner-btn:hover {
+  text-shadow: 0 0 8px rgba(51, 255, 0, 0.6);
+  box-shadow: 0 0 8px rgba(51, 255, 0, 0.2);
+}
+
 .content-area {
   flex: 1;
   overflow-y: auto;
@@ -191,6 +258,14 @@ onMounted(async () => {
   padding: 0.5rem 1rem;
   border-top: 1px solid var(--app-border);
   flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.app-footer--clickable {
+  cursor: pointer;
+}
+.app-footer--clickable:hover {
+  background: var(--app-accent-hover-bg, rgba(99, 102, 241, 0.06));
 }
 
 .engine-status {

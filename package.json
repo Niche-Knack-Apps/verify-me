@@ -1,6 +1,6 @@
 {
   "name": "verify-me",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Text-to-Speech and Voice Cloning desktop application",
   "type": "module",
   "license": "Apache-2.0",
@@ -11,7 +11,7 @@
     "build:linux": "npm run build && cd src-tauri && cargo tauri build --bundles deb,appimage,rpm",
     "build:windows": "npm run build && cd src-tauri && cargo tauri build --bundles msi,nsis",
     "build:mac": "npm run build && cd src-tauri && cargo tauri build --bundles dmg",
-    "build:release": "bash scripts/copy-to-releases.sh",
+    "build:release": "npx tauri build && bash scripts/copy-to-releases.sh",
     "typecheck": "vue-tsc --noEmit",
     "cap:sync": "npx cap sync android",
     "cap:open": "CAPACITOR_ANDROID_STUDIO_PATH=$HOME/android-studio/bin/studio.sh npx cap open android",

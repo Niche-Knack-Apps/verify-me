@@ -1,6 +1,19 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 
+function isCapacitor(): boolean {
+  return 'Capacitor' in window;
+}
+
+let _modelManager: any = null;
+async function getModelManager() {
+  if (!_modelManager) {
+    const { registerPlugin } = await import('@capacitor/core');
+    _modelManager = registerPlugin('ModelManager');
+  }
+  return _modelManager;
+}
+
 export interface Voice {
   id: string;
   name: string;
@@ -13,6 +26,7 @@ export interface TTSModel {
   status: 'available' | 'downloadable';
   supportsClone: boolean;
   supportsVoicePrompt: boolean;
+  supportsVoiceDesign: boolean;
   voices: Voice[];
   downloadUrl?: string;
   hfRepo?: string;
@@ -25,9 +39,26 @@ export const useModelsStore = defineStore('models', () => {
 
   async function loadModels() {
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      const result = await invoke<TTSModel[]>('list_models');
-      models.value = result;
+      if (isCapacitor()) {
+        const ModelManager = await getModelManager();
+        const result = await ModelManager.listModels();
+        // Map from plugin format to TTSModel[]
+        models.value = (result.models ?? []).map((m: any) => ({
+          id: m.id,
+          name: m.name,
+          size: m.size,
+          status: m.status,
+          supportsClone: m.supportsClone ?? false,
+          supportsVoicePrompt: m.supportsVoicePrompt ?? false,
+          supportsVoiceDesign: m.supportsVoiceDesign ?? false,
+          voices: m.voices ?? [],
+          hfRepo: m.hfRepo,
+        }));
+      } else {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const result = await invoke<TTSModel[]>('list_models');
+        models.value = result;
+      }
     } catch (e) {
       console.error('Failed to load models:', e);
     }
@@ -41,22 +72,29 @@ export const useModelsStore = defineStore('models', () => {
     }
 
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
       downloading.value = modelId;
       downloadProgress.value[modelId] = 0;
 
-      if (model.hfRepo) {
-        // HuggingFace model — download via Python subprocess
-        await invoke('download_hf_model', {
-          repoId: model.hfRepo,
+      if (isCapacitor()) {
+        const ModelManager = await getModelManager();
+        await ModelManager.downloadModel({
           modelId,
-          token: hfToken || null,
+          hfToken: hfToken || null,
         });
-      } else if (model.downloadUrl) {
-        // Direct URL download via reqwest
-        await invoke('download_model', { url: model.downloadUrl, filename: modelId });
       } else {
-        throw new Error('No download source for model');
+        const { invoke } = await import('@tauri-apps/api/core');
+
+        if (model.hfRepo) {
+          await invoke('download_hf_model', {
+            repoId: model.hfRepo,
+            modelId,
+            token: hfToken || null,
+          });
+        } else if (model.downloadUrl) {
+          await invoke('download_model', { url: model.downloadUrl, filename: modelId });
+        } else {
+          throw new Error('No download source for model');
+        }
       }
 
       delete downloadProgress.value[modelId];
@@ -72,8 +110,13 @@ export const useModelsStore = defineStore('models', () => {
 
   async function deleteModel(id: string) {
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('delete_model', { modelId: id });
+      if (isCapacitor()) {
+        const ModelManager = await getModelManager();
+        await ModelManager.deleteModel({ modelId: id });
+      } else {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('delete_model', { modelId: id });
+      }
       await loadModels();
     } catch (e) {
       console.error('Failed to delete model:', e);
@@ -82,10 +125,19 @@ export const useModelsStore = defineStore('models', () => {
 
   async function initEventListeners() {
     try {
-      const { listen } = await import('@tauri-apps/api/event');
-      await listen<{ filename: string; percent: number }>('model-download-progress', (event) => {
-        downloadProgress.value[event.payload.filename] = event.payload.percent;
-      });
+      if (isCapacitor()) {
+        const ModelManager = await getModelManager();
+        await ModelManager.addListener('model-download-progress',
+          (data: { modelId: string; filename: string; percent: number }) => {
+            downloadProgress.value[data.modelId] = data.percent;
+          }
+        );
+      } else {
+        const { listen } = await import('@tauri-apps/api/event');
+        await listen<{ filename: string; percent: number }>('model-download-progress', (event) => {
+          downloadProgress.value[event.payload.filename] = event.payload.percent;
+        });
+      }
     } catch (e) {
       console.error('Failed to init model event listeners:', e);
     }

@@ -22,6 +22,8 @@ fn main() {
             engine::stop_engine,
             engine::engine_health,
             engine::get_device_info,
+            engine::check_python_environment,
+            engine::setup_python_environment,
             tts::generate_speech,
             tts::voice_clone,
             tts::get_voices,

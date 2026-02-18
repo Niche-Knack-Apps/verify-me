@@ -8,6 +8,8 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(AudioRecorderPlugin.class);
         registerPlugin(FilePickerPlugin.class);
+        registerPlugin(TTSEnginePlugin.class);
+        registerPlugin(ModelManagerPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

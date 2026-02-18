@@ -24,8 +24,37 @@ const settings = useSettingsStore();
       />
     </div>
 
+    <div v-if="tts.selectedModel?.supportsVoiceDesign" class="voice-mode-toggle">
+      <button
+        class="mode-btn"
+        :class="{ active: tts.voiceMode === 'speaker' }"
+        @click="tts.voiceMode = 'speaker'"
+      >
+        {{ settings.isEighties ? '[ PREDEFINED SPEAKER ]' : 'Predefined Speaker' }}
+      </button>
+      <button
+        class="mode-btn"
+        :class="{ active: tts.voiceMode === 'design' }"
+        @click="tts.voiceMode = 'design'"
+      >
+        {{ settings.isEighties ? '[ DESIGN VOICE ]' : 'Design Voice' }}
+      </button>
+    </div>
+
+    <div v-if="tts.voiceMode === 'design' && tts.selectedModel?.supportsVoiceDesign" class="input-section">
+      <label class="field-label">
+        {{ settings.isEighties ? '> VOICE DESCRIPTION' : 'Voice Description' }}
+      </label>
+      <textarea
+        v-model="tts.voiceDescription"
+        class="text-input"
+        placeholder="Describe the voice you want, e.g. 'A young woman with a gentle, breathy voice and subtle British accent'"
+        rows="3"
+      />
+    </div>
+
     <div class="controls-row">
-      <div class="control-group">
+      <div v-if="tts.voiceMode === 'speaker' || !tts.selectedModel?.supportsVoiceDesign" class="control-group">
         <label class="field-label" for="voice-select">
           {{ settings.isEighties ? '> VOICE' : 'Voice' }}
         </label>
@@ -49,16 +78,16 @@ const settings = useSettingsStore();
       </div>
     </div>
 
-    <div v-if="tts.selectedModel?.supportsVoicePrompt" class="input-section">
+    <div v-if="tts.selectedModel?.supportsVoicePrompt && tts.voiceMode === 'speaker'" class="input-section">
       <label class="field-label">
-        {{ settings.isEighties ? '> VOICE PROMPT' : 'Voice Prompt' }}
+        {{ settings.isEighties ? '> VOICE INSTRUCTIONS' : 'Voice Instructions' }}
         <span class="optional-tag">(optional)</span>
       </label>
       <input
         type="text"
         v-model="tts.voicePrompt"
         class="voice-prompt-input"
-        placeholder="Describe the voice, e.g. 'warm female narrator'"
+        placeholder="e.g. 'Speak in a whisper', 'Sound excited'"
       />
     </div>
 
@@ -145,6 +174,58 @@ const settings = useSettingsStore();
 
 [data-theme="eighties"] .text-input {
   text-shadow: var(--app-glow);
+}
+
+.voice-mode-toggle {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+  overflow: hidden;
+}
+
+.mode-btn {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  min-height: 40px;
+  font-family: var(--app-font);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  background: var(--app-bg);
+  color: var(--app-muted);
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.mode-btn + .mode-btn {
+  border-left: 1px solid var(--app-border);
+}
+
+.mode-btn.active {
+  background: var(--app-accent);
+  color: #fff;
+}
+
+.mode-btn:hover:not(.active) {
+  background: var(--app-surface);
+}
+
+[data-theme="eighties"] .voice-mode-toggle {
+  border-radius: 0;
+}
+
+[data-theme="eighties"] .mode-btn {
+  font-size: 16px;
+  font-weight: 400;
+  letter-spacing: 0.05em;
+}
+
+[data-theme="eighties"] .mode-btn.active {
+  background: transparent;
+  color: var(--app-accent);
+  text-shadow: 0 0 8px rgba(51, 255, 0, 0.4);
+  border-bottom: 2px solid var(--app-accent);
 }
 
 .controls-row {

@@ -7,7 +7,7 @@ import Toggle from '@/components/ui/Toggle.vue';
 import LoggingPanel from '@/components/settings/LoggingPanel.vue';
 import AboutPanel from '@/components/settings/AboutPanel.vue';
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.2.0';
 
 const emit = defineEmits<{
   close: [];
@@ -215,6 +215,64 @@ onMounted(() => {
                 : 'Requires engine restart to take effect'
               }}
             </p>
+
+            <!-- Engine Controls -->
+            <div class="engine-controls">
+              <Button
+                v-if="!settings.engineRunning"
+                variant="primary"
+                size="sm"
+                :disabled="settings.engineStarting"
+                @click="settings.startEngine()"
+              >
+                {{ settings.isEighties
+                  ? (settings.engineStarting ? '[STARTING...]' : '[START]')
+                  : (settings.engineStarting ? 'Starting...' : 'Start Engine')
+                }}
+              </Button>
+              <Button
+                v-if="settings.engineRunning"
+                variant="secondary"
+                size="sm"
+                @click="settings.restartEngine()"
+              >
+                {{ settings.isEighties ? '[RESTART]' : 'Restart' }}
+              </Button>
+              <Button
+                v-if="settings.engineRunning"
+                variant="secondary"
+                size="sm"
+                @click="settings.stopEngine()"
+              >
+                {{ settings.isEighties ? '[STOP]' : 'Stop' }}
+              </Button>
+            </div>
+
+            <!-- Engine Error -->
+            <p v-if="settings.engineError" class="engine-error">
+              {{ settings.isEighties ? `ERROR: ${settings.engineError}` : settings.engineError }}
+            </p>
+
+            <!-- Python Environment Warning -->
+            <div v-if="settings.pythonEnvReady === false" class="python-warning">
+              <p class="python-warning-text">
+                {{ settings.isEighties
+                  ? `// PYTHON ENV ISSUE: ${settings.pythonEnvIssue ?? 'DEPS NOT INSTALLED'}`
+                  : `Python environment issue: ${settings.pythonEnvIssue ?? 'Dependencies not installed'}`
+                }}
+              </p>
+              <Button
+                variant="primary"
+                size="sm"
+                :disabled="settings.settingUpPython"
+                @click="settings.setupPythonEnvironment()"
+              >
+                {{ settings.isEighties
+                  ? (settings.settingUpPython ? '[INSTALLING...]' : '[INSTALL DEPS]')
+                  : (settings.settingUpPython ? 'Installing...' : 'Install Dependencies')
+                }}
+              </Button>
+            </div>
           </div>
         </div>
 
@@ -632,6 +690,48 @@ onMounted(() => {
 [data-theme="eighties"] .download-error {
   font-size: 14px;
   border-radius: 0;
+}
+
+.engine-controls {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.engine-error {
+  font-size: 0.8125rem;
+  color: var(--app-error);
+  padding: 0.375rem 0.5rem;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: var(--app-radius);
+}
+
+[data-theme="eighties"] .engine-error {
+  font-size: 14px;
+  border-radius: 0;
+}
+
+.python-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px solid rgba(234, 179, 8, 0.3);
+  border-radius: var(--app-radius);
+}
+
+[data-theme="eighties"] .python-warning {
+  border-radius: 0;
+}
+
+.python-warning-text {
+  font-size: 0.8125rem;
+  color: var(--app-muted);
+}
+
+[data-theme="eighties"] .python-warning-text {
+  font-size: 14px;
 }
 
 .modal-footer {

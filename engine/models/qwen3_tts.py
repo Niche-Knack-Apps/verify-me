@@ -15,48 +15,75 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+from scipy.signal import resample
 
 logger = logging.getLogger(__name__)
 
 # HuggingFace repo IDs
 HF_REPO_CUSTOM_VOICE = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 HF_REPO_BASE = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+HF_REPO_VOICE_DESIGN = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 
-# Language mapping: the model expects full names, not ISO codes
+# Language mapping: the model expects capitalized full names
 LANG_MAP = {
-    "en": "english",
-    "zh": "chinese",
-    "ja": "japanese",
-    "ko": "korean",
-    "de": "german",
-    "fr": "french",
-    "ru": "russian",
-    "pt": "portuguese",
-    "es": "spanish",
-    "it": "italian",
+    "en": "English",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "de": "German",
+    "fr": "French",
+    "ru": "Russian",
+    "pt": "Portuguese",
+    "es": "Spanish",
+    "it": "Italian",
 }
 
 # Predefined speakers from the CustomVoice model
 VOICES = [
-    {"id": "Aiden", "name": "Aiden (Male, American English)", "language": "english"},
-    {"id": "Ryan", "name": "Ryan (Male, English)", "language": "english"},
-    {"id": "Vivian", "name": "Vivian (Female, Chinese)", "language": "chinese"},
-    {"id": "Serena", "name": "Serena (Female, Chinese)", "language": "chinese"},
-    {"id": "Dylan", "name": "Dylan (Male, Chinese)", "language": "chinese"},
-    {"id": "Eric", "name": "Eric (Male, Chinese/Sichuan)", "language": "chinese"},
-    {"id": "Uncle_Fu", "name": "Uncle Fu (Male, Chinese)", "language": "chinese"},
-    {"id": "Ono_Anna", "name": "Ono Anna (Female, Japanese)", "language": "japanese"},
-    {"id": "Sohee", "name": "Sohee (Female, Korean)", "language": "korean"},
+    {"id": "Aiden", "name": "Aiden (Male, American English)", "language": "English"},
+    {"id": "Ryan", "name": "Ryan (Male, English)", "language": "English"},
+    {"id": "Vivian", "name": "Vivian (Female, Chinese)", "language": "Chinese"},
+    {"id": "Serena", "name": "Serena (Female, Chinese)", "language": "Chinese"},
+    {"id": "Dylan", "name": "Dylan (Male, Chinese)", "language": "Chinese"},
+    {"id": "Eric", "name": "Eric (Male, Chinese/Sichuan)", "language": "Chinese"},
+    {"id": "Uncle_Fu", "name": "Uncle Fu (Male, Chinese)", "language": "Chinese"},
+    {"id": "Ono_Anna", "name": "Ono Anna (Female, Japanese)", "language": "Japanese"},
+    {"id": "Sohee", "name": "Sohee (Female, Korean)", "language": "Korean"},
 ]
 
 
 def _resolve_language(lang_str):
-    """Map language codes (en, zh, etc.) to full names expected by the model."""
+    """Map language codes (en, zh, etc.) to capitalized names expected by the model.
+
+    Returns None for auto-detection (the model expects Python None, not "auto").
+    """
     if lang_str is None:
-        return "auto"
-    mapped = LANG_MAP.get(lang_str.lower(), lang_str.lower())
+        return None
+    mapped = LANG_MAP.get(lang_str.lower(), lang_str.capitalize())
     logger.debug("Language resolved: '%s' -> '%s'", lang_str, mapped)
     return mapped
+
+
+def _apply_speed(audio_array, speed):
+    """Resample audio to change playback speed. speed>1 = faster."""
+    if abs(speed - 1.0) < 0.05:
+        return audio_array
+    new_length = int(len(audio_array) / speed)
+    return resample(audio_array, new_length).astype(audio_array.dtype)
+
+
+def _speed_instruct(speed):
+    """Build a natural-language pace instruction for the model based on speed value."""
+    if speed <= 0.7:
+        return "Speak very slowly and deliberately. "
+    elif speed <= 0.9:
+        return "Speak at a slow, relaxed pace. "
+    elif speed < 1.1:
+        return ""
+    elif speed <= 1.3:
+        return "Speak at a quick pace. "
+    else:
+        return "Speak very fast. "
 
 
 def _write_wav(wavs, sample_rate, output_path):
@@ -75,6 +102,7 @@ class Qwen3TTSModel:
     def __init__(self):
         self._model = None
         self._base_model = None  # Separate Base model for voice cloning
+        self._voice_design_model = None  # Separate VoiceDesign model
         self._model_dir = None
 
     @staticmethod
@@ -162,6 +190,25 @@ class Qwen3TTSModel:
         logger.info("Base model loaded — tts_model_type=%s", tts_type)
         logger.info("Qwen3 TTS Base ready for voice cloning")
 
+    def _ensure_voice_design_model(self):
+        """Lazily load the VoiceDesign model for voice-from-description generation."""
+        if self._voice_design_model is not None:
+            return
+
+        from qwen_tts import Qwen3TTSModel as QwenModel
+
+        model_path = self._resolve_model_path(
+            self._model_dir, "qwen3-tts-voice-design", HF_REPO_VOICE_DESIGN
+        )
+        kwargs = self._load_kwargs()
+
+        logger.info("Loading VoiceDesign model from: %s", model_path)
+        self._voice_design_model = QwenModel.from_pretrained(model_path, **kwargs)
+
+        tts_type = getattr(self._voice_design_model.model, "tts_model_type", "unknown")
+        logger.info("VoiceDesign model loaded — tts_model_type=%s", tts_type)
+        logger.info("Qwen3 TTS VoiceDesign ready")
+
     def unload(self):
         """Unload models and free memory."""
         if self._model is not None:
@@ -174,6 +221,11 @@ class Qwen3TTSModel:
             self._base_model = None
             logger.info("Base model unloaded")
 
+        if self._voice_design_model is not None:
+            del self._voice_design_model
+            self._voice_design_model = None
+            logger.info("VoiceDesign model unloaded")
+
         self._model_dir = None
 
         try:
@@ -185,13 +237,66 @@ class Qwen3TTSModel:
         except ImportError:
             pass
 
-    def generate(self, text, voice="Aiden", speed=1.0, output_path="output.wav", voice_prompt=None):
-        """Generate speech using the CustomVoice model."""
+    def generate(self, text, voice="Aiden", speed=1.0, output_path="output.wav",
+                 voice_prompt=None, voice_mode=None, voice_description=None):
+        """Generate speech using CustomVoice or VoiceDesign model."""
+        if voice_mode == "design":
+            return self._generate_voice_design(text, speed, output_path, voice_description)
+        return self._generate_custom_voice(text, voice, speed, output_path, voice_prompt)
+
+    def _generate_voice_design(self, text, speed, output_path, voice_description):
+        """Generate speech using the VoiceDesign model (voice from NL description)."""
+        self._ensure_voice_design_model()
+
+        logger.info(
+            "=== TTS Generate (VoiceDesign) ===\n"
+            "  text:        '%s' (%d chars)\n"
+            "  description: %s\n"
+            "  speed:       %s\n"
+            "  output:      %s",
+            text[:80],
+            len(text),
+            (voice_description[:80] + "...") if voice_description and len(voice_description) > 80 else voice_description,
+            speed,
+            output_path,
+        )
+
+        # Build instruct: prepend speed hint, then append voice description
+        speed_hint = _speed_instruct(speed)
+        desc = voice_description.strip() if voice_description and voice_description.strip() else ""
+        instruct = (speed_hint + desc).strip() or None
+
+        gen_kwargs = {}
+        if instruct:
+            gen_kwargs["instruct"] = instruct
+            logger.info("VoiceDesign instruction: '%s'", instruct[:100])
+
+        logger.info("Calling generate_voice_design(language=None, non_streaming=True)")
+
+        wavs, sample_rate = self._voice_design_model.generate_voice_design(
+            text=text,
+            language=None,
+            non_streaming_mode=True,
+            **gen_kwargs,
+        )
+
+        logger.info("VoiceDesign complete: %d samples, %d Hz", len(wavs[0]), sample_rate)
+
+        if abs(speed - 1.0) >= 0.05:
+            original_len = len(wavs[0])
+            wavs[0] = _apply_speed(wavs[0], speed)
+            logger.info("Speed %.2fx applied: %d -> %d samples", speed, original_len, len(wavs[0]))
+
+        _write_wav(wavs, sample_rate, output_path)
+        return output_path
+
+    def _generate_custom_voice(self, text, voice, speed, output_path, voice_prompt):
+        """Generate speech using the CustomVoice model (predefined speaker + instructions)."""
         if not self._model:
             raise RuntimeError("Model not loaded")
 
         logger.info(
-            "=== TTS Generate ===\n"
+            "=== TTS Generate (CustomVoice) ===\n"
             "  text:    '%s' (%d chars)\n"
             "  voice:   %s\n"
             "  speed:   %s\n"
@@ -224,17 +329,22 @@ class Qwen3TTSModel:
                     speaker,
                 )
 
-        # Detect language from speaker metadata
+        # Detect language from speaker metadata (None = auto-detect)
         voice_info = next(
             (v for v in VOICES if v["id"].lower() == str(speaker).lower()), None
         )
-        language = voice_info["language"] if voice_info else "auto"
+        language = voice_info["language"] if voice_info else None
         logger.info("Language for speaker '%s': %s", speaker, language)
 
+        # Build instruct: prepend speed hint, then append user's voice prompt
+        speed_hint = _speed_instruct(speed)
+        user_instruct = voice_prompt.strip() if voice_prompt and voice_prompt.strip() else ""
+        instruct = (speed_hint + user_instruct).strip()
+
         gen_kwargs = {}
-        if voice_prompt and voice_prompt.strip():
-            gen_kwargs["instruct"] = voice_prompt.strip()
-            logger.info("Voice instruction: '%s'", voice_prompt.strip()[:80])
+        if instruct:
+            gen_kwargs["instruct"] = instruct
+            logger.info("Voice instruction: '%s'", instruct[:80])
 
         logger.info(
             "Calling generate_custom_voice(speaker=%s, language=%s, non_streaming=True, %s)",
@@ -252,6 +362,15 @@ class Qwen3TTSModel:
         )
 
         logger.info("Generation complete: %d samples, %d Hz", len(wavs[0]), sample_rate)
+
+        # Apply speed via resampling (in addition to instruct hint)
+        if abs(speed - 1.0) >= 0.05:
+            original_len = len(wavs[0])
+            wavs[0] = _apply_speed(wavs[0], speed)
+            logger.info(
+                "Speed %.2fx applied: %d -> %d samples", speed, original_len, len(wavs[0])
+            )
+
         _write_wav(wavs, sample_rate, output_path)
         return output_path
 
@@ -272,12 +391,12 @@ class Qwen3TTSModel:
         self._ensure_base_model()
 
         logger.info(
-            "Calling generate_voice_clone(language=auto, x_vector_only=True, non_streaming=True)"
+            "Calling generate_voice_clone(language=None, x_vector_only=True, non_streaming=True)"
         )
 
         wavs, sample_rate = self._base_model.generate_voice_clone(
             text=text,
-            language="auto",
+            language=None,
             ref_audio=reference_audio,
             x_vector_only_mode=True,
             non_streaming_mode=True,
@@ -301,6 +420,6 @@ class Qwen3TTSModel:
                     if info:
                         result.append(info)
                     else:
-                        result.append({"id": str(s), "name": str(s), "language": "auto"})
+                        result.append({"id": str(s), "name": str(s), "language": None})
                 return result
         return VOICES

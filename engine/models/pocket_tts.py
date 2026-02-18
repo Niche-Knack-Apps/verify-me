@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import scipy.io.wavfile
+from scipy.signal import resample
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,14 @@ class PocketTTSModel:
             )
         return self._voice_states[voice_id]
 
+    @staticmethod
+    def _apply_speed(audio_array, speed):
+        """Resample audio to change playback speed. speed>1 = faster."""
+        if abs(speed - 1.0) < 0.05:
+            return audio_array
+        new_length = int(len(audio_array) / speed)
+        return resample(audio_array, new_length).astype(audio_array.dtype)
+
     def _write_pcm16(self, audio_tensor, output_path):
         """Write audio tensor as 16-bit PCM WAV (compatible with all players)."""
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -151,6 +160,17 @@ class PocketTTSModel:
 
         voice_state = self._get_voice_state(voice)
         audio = self._model.generate_audio(voice_state, text)
+
+        # Apply speed via resampling
+        if abs(speed - 1.0) >= 0.05:
+            samples = audio.numpy()
+            original_len = len(samples)
+            samples = self._apply_speed(samples, speed)
+            logger.info("Speed %.2fx applied: %d -> %d samples", speed, original_len, len(samples))
+            # Convert back: _write_pcm16 expects tensor-like with .numpy()
+            import torch
+            audio = torch.from_numpy(samples)
+
         self._write_pcm16(audio, output_path)
         return output_path
 

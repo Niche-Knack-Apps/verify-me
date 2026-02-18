@@ -1,4 +1,5 @@
 use crate::services::path_service;
+use crate::services::python_resolver;
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
@@ -14,6 +15,7 @@ struct CatalogEntry {
     size: &'static str,
     supports_clone: bool,
     supports_voice_prompt: bool,
+    supports_voice_design: bool,
     bundled: bool,
     download_url: Option<&'static str>,
     hf_repo: Option<&'static str>,
@@ -27,6 +29,7 @@ static KNOWN_MODELS: &[CatalogEntry] = &[
         size: "~200 MB",
         supports_clone: true,
         supports_voice_prompt: false,
+        supports_voice_design: false,
         bundled: true,
         download_url: None,
         hf_repo: None,
@@ -68,9 +71,10 @@ static KNOWN_MODELS: &[CatalogEntry] = &[
     CatalogEntry {
         id: "qwen3-tts",
         name: "Qwen 3 TTS",
-        size: "~9 GB",
+        size: "~27 GB",
         supports_clone: true,
         supports_voice_prompt: true,
+        supports_voice_design: true,
         bundled: false,
         download_url: None,
         hf_repo: Some("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"),
@@ -131,6 +135,7 @@ pub struct ModelInfo {
     pub status: String,
     pub supports_clone: bool,
     pub supports_voice_prompt: bool,
+    pub supports_voice_design: bool,
     pub voices: Vec<VoiceInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download_url: Option<String>,
@@ -235,6 +240,7 @@ pub async fn list_models(app: AppHandle) -> Result<Vec<ModelInfo>, String> {
                 },
                 supports_clone: entry.supports_clone,
                 supports_voice_prompt: entry.supports_voice_prompt,
+                supports_voice_design: entry.supports_voice_design,
                 voices: entry
                     .voices
                     .iter()
@@ -306,50 +312,12 @@ pub async fn download_model(
 
 /// Resolve the Python path for running download scripts.
 fn resolve_python_path(app: &AppHandle) -> Result<PathBuf, String> {
-    #[cfg(debug_assertions)]
-    {
-        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .ok_or("Failed to resolve project root")?
-            .to_path_buf();
-
-        let venv_python = super::engine::venv_python_path(&project_root);
-        if venv_python.exists() {
-            return Ok(venv_python);
-        }
-    }
-
-    // Fallback to system python (respects VERIFY_ME_PYTHON env var)
-    let _ = app; // suppress unused warning in release
-    Ok(super::engine::system_python())
+    python_resolver::resolve_python(app)
 }
 
 /// Resolve the path to the download_model.py script.
 fn resolve_download_script(app: &AppHandle) -> Result<PathBuf, String> {
-    #[cfg(debug_assertions)]
-    {
-        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .ok_or("Failed to resolve project root")?
-            .to_path_buf();
-
-        let script = project_root.join("engine/download_model.py");
-        if script.exists() {
-            return Ok(script);
-        }
-    }
-
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("Failed to get resource dir: {}", e))?;
-
-    let script = resource_dir.join("engine").join("download_model.py");
-    if script.exists() {
-        return Ok(script);
-    }
-
-    Err("Download script not found".to_string())
+    python_resolver::resolve_download_script(app)
 }
 
 /// Download a single HuggingFace repo to a local directory.
@@ -459,11 +427,18 @@ fn run_hf_download(
 
 /// Additional HF repos to download alongside a model.
 /// Maps model_id -> list of (repo_id, local_subdir).
-static COMPANION_DOWNLOADS: &[(&str, &str, &str)] = &[(
-    "qwen3-tts",
-    "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-    "qwen3-tts-base",
-)];
+static COMPANION_DOWNLOADS: &[(&str, &str, &str)] = &[
+    (
+        "qwen3-tts",
+        "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        "qwen3-tts-base",
+    ),
+    (
+        "qwen3-tts",
+        "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+        "qwen3-tts-voice-design",
+    ),
+];
 
 #[tauri::command]
 pub async fn download_hf_model(

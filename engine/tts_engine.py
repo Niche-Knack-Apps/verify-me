@@ -70,13 +70,15 @@ class TTSEngine:
             logger.info("Model switch needed: %s -> %s", self._current_model_id, model_id)
             self.load_model(model_id)
 
-    def generate(self, text, model_id, voice="default", speed=1.0, output_path=None, voice_prompt=None):
+    def generate(self, text, model_id, voice="default", speed=1.0, output_path=None,
+                 voice_prompt=None, voice_mode=None, voice_description=None):
         """Generate speech audio from text."""
         logger.info(
-            "generate() called: model=%s, voice=%s, speed=%s, text_len=%d, output=%s",
+            "generate() called: model=%s, voice=%s, speed=%s, voice_mode=%s, text_len=%d, output=%s",
             model_id,
             voice,
             speed,
+            voice_mode,
             len(text),
             output_path,
         )
@@ -89,7 +91,12 @@ class TTSEngine:
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
         try:
-            self._current_model.generate(text, voice, speed, output_path, voice_prompt=voice_prompt)
+            self._current_model.generate(
+                text, voice, speed, output_path,
+                voice_prompt=voice_prompt,
+                voice_mode=voice_mode,
+                voice_description=voice_description,
+            )
             logger.info("generate() complete: %s", output_path)
             return output_path
         except Exception:

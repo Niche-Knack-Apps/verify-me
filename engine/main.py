@@ -108,6 +108,8 @@ def handle_tts_generate(req_id, params):
             speed=params.get("speed", 1.0),
             output_path=params["output_path"],
             voice_prompt=params.get("voice_prompt"),
+            voice_mode=params.get("voice_mode"),
+            voice_description=params.get("voice_description"),
         )
         return success_response(req_id, {"audio_path": audio_path})
     except Exception as e:
@@ -202,6 +204,43 @@ def write_response(response):
     _real_stdout.flush()
 
 
+def _log_startup_diagnostics():
+    """Log a one-time diagnostic summary on engine startup."""
+    try:
+        import torch
+
+        cuda_build = torch.version.cuda or "N/A"
+        cuda_avail = torch.cuda.is_available()
+        device = get_device()
+
+        logger.info(
+            "=== Engine Diagnostics ===\n"
+            "  torch:          %s\n"
+            "  CUDA build:     %s\n"
+            "  CUDA available: %s\n"
+            "  device:         %s",
+            torch.__version__,
+            cuda_build,
+            cuda_avail,
+            device,
+        )
+
+        if torch.version.cuda and not cuda_avail:
+            from device_manager import _run_nvidia_smi
+
+            smi = _run_nvidia_smi()
+            logger.warning(
+                "GPU ISSUE: PyTorch was built with CUDA %s but torch.cuda.is_available() = False.\n"
+                "  nvidia-smi: %s\n"
+                "  Suggestions: sudo modprobe nvidia, reboot after kernel update, "
+                "or check hybrid graphics settings.",
+                cuda_build,
+                smi.splitlines()[0] if smi else "N/A",
+            )
+    except ImportError:
+        logger.info("=== Engine Diagnostics ===\n  torch: not installed\n  device: cpu")
+
+
 def main():
     global running
 
@@ -209,6 +248,8 @@ def main():
     engine_dir = os.path.dirname(os.path.abspath(__file__))
     if engine_dir not in sys.path:
         sys.path.insert(0, engine_dir)
+
+    _log_startup_diagnostics()
 
     signal.signal(signal.SIGINT, lambda *_: setattr(sys.modules[__name__], "running", False))
     signal.signal(signal.SIGTERM, lambda *_: setattr(sys.modules[__name__], "running", False))

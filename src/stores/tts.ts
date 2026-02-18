@@ -11,6 +11,15 @@ function isCapacitor(): boolean {
   return 'Capacitor' in window;
 }
 
+let _ttsEngine: any = null;
+async function getTTSEngine() {
+  if (!_ttsEngine) {
+    const { registerPlugin } = await import('@capacitor/core');
+    _ttsEngine = registerPlugin('TTSEngine');
+  }
+  return _ttsEngine;
+}
+
 export const useTTSStore = defineStore('tts', () => {
   const modelsStore = useModelsStore();
 
@@ -18,6 +27,8 @@ export const useTTSStore = defineStore('tts', () => {
   const selectedModelId = ref('pocket-tts');
   const selectedVoice = ref('alba');
   const voicePrompt = ref('');
+  const voiceMode = ref<'speaker' | 'design'>('speaker');
+  const voiceDescription = ref('');
   const speed = ref(1.0);
   const outputAudioPath = ref<string | null>(null);
   const isGenerating = ref(false);
@@ -37,10 +48,12 @@ export const useTTSStore = defineStore('tts', () => {
     return selectedModel.value?.voices ?? [{ id: 'default', name: 'Default' }];
   });
 
-  // Reset voice and prompt when model changes
+  // Reset voice, prompt, and mode when model changes
   watch(selectedModelId, () => {
     selectedVoice.value = voices.value[0]?.id ?? 'alba';
     voicePrompt.value = '';
+    voiceMode.value = 'speaker';
+    voiceDescription.value = '';
   });
 
   // ── Recording: Capacitor (Android) ──────────────────────────
@@ -179,24 +192,52 @@ export const useTTSStore = defineStore('tts', () => {
     isGenerating.value = true;
     error.value = null;
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      const params: Record<string, unknown> = {
-        text: text.value,
-        modelId: selectedModelId.value,
-        voice: selectedVoice.value,
-        speed: speed.value,
-      };
-      if (voicePrompt.value.trim()) {
-        params.voicePrompt = voicePrompt.value.trim();
+      if (isCapacitor()) {
+        const TTSEngine = await getTTSEngine();
+        const result = await TTSEngine.generateSpeech({
+          text: text.value,
+          voice: selectedVoice.value,
+          speed: speed.value,
+        });
+        if (!result.success) {
+          throw new Error(result.error ?? 'Speech generation failed');
+        }
+        // Read the generated file as a blob URL
+        const { Filesystem, Directory } = await import('@capacitor/filesystem');
+        const fileData = await Filesystem.readFile({ path: result.filePath });
+        const byteString = atob(fileData.data as string);
+        const bytes = new Uint8Array(byteString.length);
+        for (let i = 0; i < byteString.length; i++) {
+          bytes[i] = byteString.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: 'audio/wav' });
+        if (outputAudioPath.value?.startsWith('blob:')) {
+          URL.revokeObjectURL(outputAudioPath.value);
+        }
+        outputAudioPath.value = URL.createObjectURL(blob);
+      } else {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const params: Record<string, unknown> = {
+          text: text.value,
+          modelId: selectedModelId.value,
+          voice: selectedVoice.value,
+          speed: speed.value,
+        };
+        if (voiceMode.value === 'design') {
+          params.voiceMode = 'design';
+          params.voiceDescription = voiceDescription.value.trim();
+        } else if (voicePrompt.value.trim()) {
+          params.voicePrompt = voicePrompt.value.trim();
+        }
+        const result = await invoke<string>('generate_speech', params);
+        const { readFile } = await import('@tauri-apps/plugin-fs');
+        const bytes = await readFile(result);
+        const blob = new Blob([bytes], { type: 'audio/wav' });
+        if (outputAudioPath.value?.startsWith('blob:')) {
+          URL.revokeObjectURL(outputAudioPath.value);
+        }
+        outputAudioPath.value = URL.createObjectURL(blob);
       }
-      const result = await invoke<string>('generate_speech', params);
-      const { readFile } = await import('@tauri-apps/plugin-fs');
-      const bytes = await readFile(result);
-      const blob = new Blob([bytes], { type: 'audio/wav' });
-      if (outputAudioPath.value?.startsWith('blob:')) {
-        URL.revokeObjectURL(outputAudioPath.value);
-      }
-      outputAudioPath.value = URL.createObjectURL(blob);
     } catch (e) {
       error.value = String(e);
     } finally {
@@ -209,19 +250,42 @@ export const useTTSStore = defineStore('tts', () => {
     isGenerating.value = true;
     error.value = null;
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      const result = await invoke<string>('voice_clone', {
-        text: text.value,
-        referenceAudio: referenceAudioPath.value,
-        modelId: selectedModelId.value,
-      });
-      const { readFile } = await import('@tauri-apps/plugin-fs');
-      const bytes = await readFile(result);
-      const blob = new Blob([bytes], { type: 'audio/wav' });
-      if (outputAudioPath.value?.startsWith('blob:')) {
-        URL.revokeObjectURL(outputAudioPath.value);
+      if (isCapacitor()) {
+        const TTSEngine = await getTTSEngine();
+        const result = await TTSEngine.cloneVoice({
+          text: text.value,
+          referenceAudioPath: referenceAudioPath.value,
+        });
+        if (!result.success) {
+          throw new Error(result.error ?? 'Voice cloning failed');
+        }
+        const { Filesystem, Directory } = await import('@capacitor/filesystem');
+        const fileData = await Filesystem.readFile({ path: result.filePath });
+        const byteString = atob(fileData.data as string);
+        const bytes = new Uint8Array(byteString.length);
+        for (let i = 0; i < byteString.length; i++) {
+          bytes[i] = byteString.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: 'audio/wav' });
+        if (outputAudioPath.value?.startsWith('blob:')) {
+          URL.revokeObjectURL(outputAudioPath.value);
+        }
+        outputAudioPath.value = URL.createObjectURL(blob);
+      } else {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const result = await invoke<string>('voice_clone', {
+          text: text.value,
+          referenceAudio: referenceAudioPath.value,
+          modelId: selectedModelId.value,
+        });
+        const { readFile } = await import('@tauri-apps/plugin-fs');
+        const bytes = await readFile(result);
+        const blob = new Blob([bytes], { type: 'audio/wav' });
+        if (outputAudioPath.value?.startsWith('blob:')) {
+          URL.revokeObjectURL(outputAudioPath.value);
+        }
+        outputAudioPath.value = URL.createObjectURL(blob);
       }
-      outputAudioPath.value = URL.createObjectURL(blob);
     } catch (e) {
       error.value = String(e);
     } finally {
@@ -230,7 +294,7 @@ export const useTTSStore = defineStore('tts', () => {
   }
 
   return {
-    text, selectedModelId, selectedVoice, voicePrompt, speed,
+    text, selectedModelId, selectedVoice, voicePrompt, voiceMode, voiceDescription, speed,
     outputAudioPath, isGenerating, error,
     referenceAudioPath, isRecording, recordingDuration, currentLevel,
     selectedModel, voices,

@@ -37,6 +37,13 @@ modules:
       - install -Dm644 icons/32x32.png /app/share/icons/hicolor/32x32/apps/com.nicheknack.verifyme.png 2>/dev/null || true
       - install -Dm644 com.nicheknack.verifyme.desktop /app/share/applications/com.nicheknack.verifyme.desktop
       - install -Dm644 com.nicheknack.verifyme.metainfo.xml /app/share/metainfo/com.nicheknack.verifyme.metainfo.xml
+      # Bundle engine scripts
+      - mkdir -p /app/lib/verify-me/engine/models
+      - install -Dm644 engine/*.py /app/lib/verify-me/engine/
+      - install -Dm644 engine/models/*.py /app/lib/verify-me/engine/models/
+      - install -Dm644 engine/requirements.txt /app/lib/verify-me/engine/
+      # Bundle bundled models
+      - cp -r models /app/lib/verify-me/models
 
     sources:
       - type: file
@@ -48,3 +55,9 @@ modules:
         path: com.nicheknack.verifyme.desktop
       - type: file
         path: com.nicheknack.verifyme.metainfo.xml
+      - type: dir
+        path: ../../engine
+        dest: engine
+      - type: dir
+        path: ../../src-tauri/resources/models
+        dest: models

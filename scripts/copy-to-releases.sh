@@ -61,19 +61,24 @@ echo ""
 echo "[Phase 2] Building Android (Capacitor)..."
 
 if command -v npx &> /dev/null && [[ -d "android" ]]; then
-    echo "  Building web assets for Capacitor..."
-    npx vite build
-    echo "  Syncing Capacitor..."
-    npx cap sync android
+    (
+        echo "  Building web assets for Capacitor..."
+        npx vite build
+        echo "  Syncing Capacitor..."
+        npx cap sync android
 
-    echo "  Building signed release APK..."
-    cd android && ./gradlew assembleRelease && cd "$PROJECT_ROOT"
+        echo "  Building signed release APK..."
+        cd android && ./gradlew assembleRelease && cd "$PROJECT_ROOT"
 
-    # Copy APK/AAB to releases
-    find android/app/build/outputs -name "*.apk" -not -name "*debug*" -exec cp {} "$RELEASES_DIR/android/" \; 2>/dev/null || true
-    find android/app/build/outputs -name "*.aab" -not -name "*debug*" -exec cp {} "$RELEASES_DIR/android/" \; 2>/dev/null || true
+        echo "  Building signed release AAB..."
+        cd android && ./gradlew bundleRelease && cd "$PROJECT_ROOT"
 
-    echo "  Android build complete."
+        # Copy APK/AAB to releases
+        find android/app/build/outputs -name "*.apk" -not -name "*debug*" -exec cp {} "$RELEASES_DIR/android/" \; 2>/dev/null || true
+        find android/app/build/outputs -name "*.aab" -not -name "*debug*" -exec cp {} "$RELEASES_DIR/android/" \; 2>/dev/null || true
+
+        echo "  Android build complete."
+    ) || echo "  WARNING: Android build failed (non-fatal, continuing)"
 else
     echo "  Skipping: npx not found or android/ directory missing"
 fi

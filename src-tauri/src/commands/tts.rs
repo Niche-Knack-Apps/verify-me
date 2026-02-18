@@ -39,6 +39,8 @@ pub async fn generate_speech(
     voice: String,
     speed: Option<f32>,
     voice_prompt: Option<String>,
+    voice_mode: Option<String>,
+    voice_description: Option<String>,
 ) -> Result<String, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
@@ -46,7 +48,7 @@ pub async fn generate_speech(
     let manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
 
     if !manager.is_running() {
-        return Err("Engine is not running. Start the engine first.".into());
+        return Err("Engine is not running. Click 'Start Engine' in the status bar or Settings.".into());
     }
 
     let output_path = generate_output_path("tts")?;
@@ -61,6 +63,12 @@ pub async fn generate_speech(
 
     if let Some(ref prompt) = voice_prompt {
         params["voice_prompt"] = serde_json::json!(prompt);
+    }
+    if let Some(ref mode) = voice_mode {
+        params["voice_mode"] = serde_json::json!(mode);
+    }
+    if let Some(ref desc) = voice_description {
+        params["voice_description"] = serde_json::json!(desc);
     }
 
     let result = manager.send_request("tts.generate", Some(params))?;
@@ -84,7 +92,7 @@ pub async fn voice_clone(
     let manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
 
     if !manager.is_running() {
-        return Err("Engine is not running. Start the engine first.".into());
+        return Err("Engine is not running. Click 'Start Engine' in the status bar or Settings.".into());
     }
 
     let output_path = generate_output_path("clone")?;
@@ -112,7 +120,7 @@ pub async fn get_voices(app: AppHandle, model_id: String) -> Result<Vec<VoiceInf
     let manager = state.0.lock().map_err(|e| format!("Lock error: {}", e))?;
 
     if !manager.is_running() {
-        return Err("Engine is not running. Start the engine first.".into());
+        return Err("Engine is not running. Click 'Start Engine' in the status bar or Settings.".into());
     }
 
     let params = serde_json::json!({
