@@ -17,6 +17,8 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import resample
 
+from checkpoint_logger import emit_checkpoint
+
 logger = logging.getLogger(__name__)
 
 # HuggingFace repo IDs
@@ -154,6 +156,10 @@ class Qwen3TTSModel:
         model_path = self._resolve_model_path(models_dir, "qwen3-tts", HF_REPO_CUSTOM_VOICE)
         kwargs = self._load_kwargs()
 
+        emit_checkpoint("model_load", {
+            "model_path": str(model_path),
+            "device": kwargs.get("device_map", "cpu"),
+        })
         logger.info("Loading CustomVoice model from: %s", model_path)
         self._model = QwenModel.from_pretrained(model_path, **kwargs)
 
@@ -346,6 +352,13 @@ class Qwen3TTSModel:
             gen_kwargs["instruct"] = instruct
             logger.info("Voice instruction: '%s'", instruct[:80])
 
+        emit_checkpoint("tokenization", {
+            "text": text[:200],
+            "voice": str(speaker),
+            "language": language,
+            "instruct": instruct[:100] if instruct else None,
+        })
+
         logger.info(
             "Calling generate_custom_voice(speaker=%s, language=%s, non_streaming=True, %s)",
             speaker,
@@ -362,6 +375,16 @@ class Qwen3TTSModel:
         )
 
         logger.info("Generation complete: %d samples, %d Hz", len(wavs[0]), sample_rate)
+
+        # Compute audio stats for checkpoint
+        audio_arr = wavs[0] if isinstance(wavs[0], np.ndarray) else np.array(wavs[0])
+        rms = float(np.sqrt(np.mean(audio_arr.astype(np.float64) ** 2)))
+        emit_checkpoint("complete", {
+            "num_samples": len(wavs[0]),
+            "duration_sec": len(wavs[0]) / sample_rate,
+            "sample_rate": sample_rate,
+            "rms": rms,
+        })
 
         # Apply speed via resampling (in addition to instruct hint)
         if abs(speed - 1.0) >= 0.05:
