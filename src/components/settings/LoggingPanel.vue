@@ -13,6 +13,17 @@ const autoRefresh = ref(false);
 const clearing = ref(false);
 const downloading = ref(false);
 const downloadResult = ref<{ success: boolean; filename?: string; error?: string } | null>(null);
+const isDev = import.meta.env.DEV;
+
+// Checkpoint comparison state (dev only)
+interface CheckpointEntry {
+  engine: string;
+  stage: string;
+  timestamp: number;
+  data: Record<string, unknown>;
+}
+const onnxCheckpoints = ref<CheckpointEntry[]>([]);
+const safetensorsCheckpoints = ref<CheckpointEntry[]>([]);
 
 let refreshInterval: number | null = null;
 
@@ -23,6 +34,17 @@ const filteredLogs = computed(() => {
   return recentLogs.value.filter((log) => log.level === filterLevel.value);
 });
 
+async function refreshCheckpoints() {
+  if (!isDev) return;
+  try {
+    const { getCheckpoints } = await import('@/services/checkpoint-listener');
+    onnxCheckpoints.value = getCheckpoints('onnx');
+    safetensorsCheckpoints.value = getCheckpoints('safetensors');
+  } catch {
+    // Checkpoint listener may not be initialized
+  }
+}
+
 async function loadData() {
   const logger = getLogger();
   if (!logger) return;
@@ -31,6 +53,7 @@ async function loadData() {
   try {
     stats.value = await logger.getStats();
     recentLogs.value = await logger.getLogs({ limit: 50 });
+    await refreshCheckpoints();
   } finally {
     loading.value = false;
   }
@@ -98,6 +121,11 @@ function formatSize(bytes: number): string {
 
 function getLevelTag(level: string): string {
   return settings.isEighties ? `[${level.toUpperCase()}]` : level.toUpperCase();
+}
+
+function formatCheckpointData(data: Record<string, unknown>): string {
+  const str = JSON.stringify(data, null, 0);
+  return str.length > 120 ? str.slice(0, 120) + '...' : str;
 }
 
 function getLevelClass(level: string): string {
@@ -202,6 +230,51 @@ onUnmounted(() => {
         <span class="log-message">{{ log.message }}</span>
       </div>
     </div>
+
+    <!-- Checkpoint Comparison (dev only) -->
+    <template v-if="isDev && (onnxCheckpoints.length > 0 || safetensorsCheckpoints.length > 0)">
+      <div class="checkpoint-section">
+        <h4 class="checkpoint-title">
+          {{ settings.isEighties ? '> CHECKPOINTS' : 'Checkpoints' }}
+        </h4>
+        <div class="checkpoint-columns">
+          <div class="checkpoint-col">
+            <div class="checkpoint-col-header">
+              {{ settings.isEighties ? 'ONNX' : 'ONNX' }}
+              <span class="checkpoint-count">({{ onnxCheckpoints.length }})</span>
+            </div>
+            <div v-if="onnxCheckpoints.length === 0" class="no-checkpoints">
+              {{ settings.isEighties ? '-- NONE --' : 'No checkpoints' }}
+            </div>
+            <div
+              v-for="(cp, i) in onnxCheckpoints"
+              :key="'onnx-' + i"
+              class="checkpoint-entry"
+            >
+              <span class="checkpoint-stage">{{ cp.stage }}</span>
+              <span class="checkpoint-data">{{ formatCheckpointData(cp.data) }}</span>
+            </div>
+          </div>
+          <div class="checkpoint-col">
+            <div class="checkpoint-col-header">
+              {{ settings.isEighties ? 'SAFETENSORS' : 'Safetensors' }}
+              <span class="checkpoint-count">({{ safetensorsCheckpoints.length }})</span>
+            </div>
+            <div v-if="safetensorsCheckpoints.length === 0" class="no-checkpoints">
+              {{ settings.isEighties ? '-- NONE --' : 'No checkpoints' }}
+            </div>
+            <div
+              v-for="(cp, i) in safetensorsCheckpoints"
+              :key="'st-' + i"
+              class="checkpoint-entry"
+            >
+              <span class="checkpoint-stage">{{ cp.stage }}</span>
+              <span class="checkpoint-data">{{ formatCheckpointData(cp.data) }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -396,5 +469,96 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--app-text);
+}
+
+/* Checkpoint comparison styles */
+.checkpoint-section {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--app-border);
+}
+
+.checkpoint-title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--app-text);
+  margin: 0 0 0.5rem 0;
+}
+
+[data-theme="eighties"] .checkpoint-title {
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0.05em;
+}
+
+.checkpoint-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.checkpoint-col {
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+  padding: 0.375rem;
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 0.75rem;
+}
+
+[data-theme="eighties"] .checkpoint-col {
+  font-size: 14px;
+  border-radius: 0;
+}
+
+.checkpoint-col-header {
+  font-weight: 600;
+  color: var(--app-accent);
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--app-border);
+  margin-bottom: 0.25rem;
+}
+
+[data-theme="eighties"] .checkpoint-col-header {
+  font-weight: 400;
+}
+
+.checkpoint-count {
+  color: var(--app-muted);
+  font-weight: 400;
+}
+
+.no-checkpoints {
+  color: var(--app-muted);
+  text-align: center;
+  padding: 0.5rem;
+}
+
+.checkpoint-entry {
+  display: flex;
+  flex-direction: column;
+  padding: 0.125rem 0;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.checkpoint-entry:last-child {
+  border-bottom: none;
+}
+
+.checkpoint-stage {
+  color: var(--app-accent);
+  font-weight: 500;
+}
+
+[data-theme="eighties"] .checkpoint-stage {
+  font-weight: 400;
+}
+
+.checkpoint-data {
+  color: var(--app-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

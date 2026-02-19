@@ -213,6 +213,16 @@ export const useTTSStore = defineStore('tts', () => {
     generatingTimer = setInterval(() => {
       generatingElapsed.value = Math.floor((Date.now() - startTime) / 1000);
     }, 1000);
+    // Dev mode: clear previous checkpoint data before new generation
+    if (import.meta.env.DEV) {
+      try {
+        const { clearCheckpoints } = await import('@/services/checkpoint-listener');
+        clearCheckpoints();
+      } catch {
+        // Ignore if checkpoint listener not available
+      }
+    }
+
     try {
       if (isCapacitor()) {
         await ensureEngineInitialized();

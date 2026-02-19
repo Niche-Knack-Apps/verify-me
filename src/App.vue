@@ -10,31 +10,60 @@ const settings = useSettingsStore();
 const modelsStore = useModelsStore();
 
 onMounted(async () => {
+  const isAndroid = 'Capacitor' in window;
+  console.log('[App] Platform:', isAndroid ? 'Android (Capacitor)' : 'Desktop (Tauri)');
+
   try {
     // Load model catalog first so UI renders immediately
     console.log('[App] Loading model catalog...');
     await modelsStore.loadModels();
-    console.log('[App] Models loaded:', modelsStore.models.map(m => `${m.id}(${m.status})`).join(', '));
+    console.log('[App] Models loaded:', modelsStore.models.length,
+      modelsStore.models.map(m => `${m.id}(${m.status})`).join(', '));
 
-    if ('Capacitor' in window) {
+    if (modelsStore.loadError) {
+      console.error('[App] Model load error:', modelsStore.loadError);
+    }
+
+    if (isAndroid) {
       // Android: Extract bundled models if needed, then start engine
       const hasBundled = modelsStore.models.some(m => m.status === 'bundled');
       if (hasBundled) {
         console.log('[App] Bundled models found, extracting...');
         try {
           await modelsStore.extractBundledModels();
-          console.log('[App] Extraction complete, models:', modelsStore.models.map(m => `${m.id}(${m.status})`).join(', '));
+          console.log('[App] Extraction complete, models:',
+            modelsStore.models.map(m => `${m.id}(${m.status})`).join(', '));
         } catch (e) {
           console.error('[App] Extraction failed:', e);
         }
       }
-      console.log('[App] Starting engine...');
-      await settings.startEngine();
-      console.log('[App] Engine started:', settings.engineRunning ? 'running' : 'failed', settings.engineError ?? '');
+
+      // Only start engine if we have at least one available model
+      const hasAvailable = modelsStore.models.some(m => m.status === 'available');
+      if (hasAvailable) {
+        console.log('[App] Starting engine...');
+        await settings.startEngine();
+        console.log('[App] Engine:', settings.engineRunning ? 'running' : 'failed',
+          settings.engineError ?? '');
+      } else {
+        console.warn('[App] No available models — skipping engine start');
+        settings.engineError = modelsStore.loadError ??
+          'No models available. Models may need to be extracted or downloaded.';
+      }
     } else {
       // Desktop: auto-start ONNX engine
       console.log('[App] Starting ONNX engine...');
       await settings.startEngine();
+    }
+
+    // Dev mode: initialize checkpoint listener for TTS pipeline debugging
+    if (import.meta.env.DEV) {
+      try {
+        const { initCheckpointListener } = await import('@/services/checkpoint-listener');
+        await initCheckpointListener();
+      } catch (e) {
+        console.warn('[App] Checkpoint listener init failed:', e);
+      }
     }
   } catch (e) {
     console.error('[App] Startup failed:', e);
