@@ -20,6 +20,7 @@ pub struct OnnxEngine {
     engine: Option<ActiveEngine>,
     model_id: Option<String>,
     model_dir: Option<PathBuf>,
+    force_cpu: bool,
 }
 
 impl OnnxEngine {
@@ -28,7 +29,17 @@ impl OnnxEngine {
             engine: None,
             model_id: None,
             model_dir: None,
+            force_cpu: false,
         }
+    }
+
+    /// Set force_cpu flag (applied on next initialize).
+    pub fn set_force_cpu(&mut self, force: bool) {
+        self.force_cpu = force;
+    }
+
+    pub fn is_force_cpu(&self) -> bool {
+        self.force_cpu
     }
 
     pub fn is_running(&self) -> bool {
@@ -56,7 +67,7 @@ impl OnnxEngine {
         } else if model_id == "qwen3-tts-safetensors" {
             #[cfg(debug_assertions)]
             {
-                let python = PythonEngine::initialize(model_dir)?;
+                let python = PythonEngine::initialize(model_dir, self.force_cpu)?;
                 ActiveEngine::Qwen3Safetensors(python)
             }
             #[cfg(not(debug_assertions))]
@@ -160,6 +171,17 @@ impl OnnxEngine {
             #[cfg(debug_assertions)]
             Some(ActiveEngine::Qwen3Safetensors(engine)) => engine.get_voices(),
             None => Err("Engine not initialized".into()),
+        }
+    }
+
+    /// Return the backend name for the current engine variant.
+    pub fn backend_name(&self) -> &str {
+        match &self.engine {
+            Some(ActiveEngine::PocketTTS(_)) => "onnx (Pocket TTS)",
+            Some(ActiveEngine::Qwen3TTS(_)) => "onnx (Qwen3 TTS)",
+            #[cfg(debug_assertions)]
+            Some(ActiveEngine::Qwen3Safetensors(_)) => "safetensors (Python)",
+            None => "none",
         }
     }
 

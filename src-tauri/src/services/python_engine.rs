@@ -27,7 +27,7 @@ pub struct PythonEngine {
 
 impl PythonEngine {
     /// Spawn the Python engine and initialize it with the given model.
-    pub fn initialize(model_dir: &Path) -> Result<Self, String> {
+    pub fn initialize(model_dir: &Path, force_cpu: bool) -> Result<Self, String> {
         let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .ok_or("Failed to resolve project root")?
@@ -61,13 +61,20 @@ impl PythonEngine {
         );
         log::info!("[python] VERIFY_ME_MODELS_DIR={}", models_dir);
 
-        let mut child = Command::new(&venv_python)
-            .arg(&main_py)
+        let mut cmd = Command::new(&venv_python);
+        cmd.arg(&main_py)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("VERIFY_ME_MODELS_DIR", &models_dir)
-            .env("VERIFY_ME_CHECKPOINT_LOGGING", "1")
+            .env("VERIFY_ME_CHECKPOINT_LOGGING", "1");
+
+        if force_cpu {
+            cmd.env("VERIFY_ME_FORCE_CPU", "1");
+            log::info!("[python] VERIFY_ME_FORCE_CPU=1");
+        }
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn Python engine: {}", e))?;
 

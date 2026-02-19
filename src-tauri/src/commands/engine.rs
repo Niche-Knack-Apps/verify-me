@@ -76,20 +76,22 @@ pub fn resolve_model_dir(app: &AppHandle, model_id: &str) -> Result<PathBuf, Str
 pub async fn start_engine(
     app: AppHandle,
     model_id: Option<String>,
-    _force_cpu: Option<bool>,
+    force_cpu: Option<bool>,
 ) -> Result<String, String> {
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
     // Default to pocket-tts if no model specified
     let model_id = model_id.unwrap_or_else(|| "pocket-tts".to_string());
+    let force_cpu = force_cpu.unwrap_or(false);
 
     let model_dir = resolve_model_dir(&app, &model_id)?;
 
     log::info!(
-        "Starting ONNX engine: model={}, dir={}",
+        "Starting ONNX engine: model={}, dir={}, force_cpu={}",
         model_id,
-        model_dir.display()
+        model_dir.display(),
+        force_cpu
     );
 
     // Check ORT_DYLIB_PATH
@@ -102,6 +104,9 @@ pub async fn start_engine(
         log::warn!("Recovering from poisoned engine lock");
         e.into_inner()
     });
+
+    // Apply force_cpu setting before initialization
+    engine.set_force_cpu(force_cpu);
 
     // Catch panics from ort library loading (e.g. missing libonnxruntime.so)
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -162,8 +167,8 @@ pub async fn engine_health(app: AppHandle) -> Result<Value, String> {
     Ok(serde_json::json!({
         "status": "ready",
         "engine_running": true,
-        "device": "cpu",
-        "backend": "onnx",
+        "device": if engine.is_force_cpu() { "cpu (forced)" } else { "cpu" },
+        "backend": engine.backend_name(),
         "model_id": engine.current_model_id(),
     }))
 }
@@ -183,8 +188,8 @@ pub async fn get_device_info(app: AppHandle) -> Result<Value, String> {
     }
 
     Ok(serde_json::json!({
-        "device": "cpu",
-        "name": "ONNX Runtime",
+        "device": if engine.is_force_cpu() { "cpu (forced)" } else { "cpu" },
+        "name": engine.backend_name(),
         "model_id": engine.current_model_id(),
     }))
 }
