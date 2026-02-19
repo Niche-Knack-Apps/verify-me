@@ -83,7 +83,7 @@ pub async fn start_engine(
 
     // Default to pocket-tts if no model specified
     let model_id = model_id.unwrap_or_else(|| "pocket-tts".to_string());
-    let force_cpu = force_cpu.unwrap_or(false);
+    let force_cpu = force_cpu.unwrap_or(true);
 
     let model_dir = resolve_model_dir(&app, &model_id)?;
 

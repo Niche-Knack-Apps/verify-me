@@ -39,13 +39,13 @@ function loadSettings(): PersistedSettings {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed.theme === 'modern' || parsed.theme === 'eighties') {
-        return { theme: parsed.theme, hfToken: parsed.hfToken ?? '', forceCpu: parsed.forceCpu ?? false };
+        return { theme: parsed.theme, hfToken: parsed.hfToken ?? '', forceCpu: parsed.forceCpu ?? true };
       }
     }
   } catch {
     // Ignore invalid storage
   }
-  return { theme: 'modern', hfToken: '', forceCpu: false };
+  return { theme: 'modern', hfToken: '', forceCpu: true };
 }
 
 function saveSettings(settings: PersistedSettings) {

@@ -29,7 +29,7 @@ impl OnnxEngine {
             engine: None,
             model_id: None,
             model_dir: None,
-            force_cpu: false,
+            force_cpu: true,
         }
     }
 
