@@ -280,10 +280,12 @@ impl Qwen3TTSEngine {
 
         // 1. Build prompt embeddings
         let t = std::time::Instant::now();
-        let (embeddings, seq_len) = self.build_prompt_embeddings(text, voice_id)?;
+        let (embeddings, seq_len, trailing_text_hidden) = self.build_prompt_embeddings(text, voice_id)?;
+        let trailing_len = trailing_text_hidden.len() / self.config.hidden_size;
         log::info!(
-            "[1/5] Prompt embeddings: seq_len={} ({} ms)",
+            "[1/5] Prompt embeddings: seq_len={}, trailing_text_hidden={} tokens ({} ms)",
             seq_len,
+            trailing_len,
             t.elapsed().as_millis()
         );
 
@@ -301,7 +303,10 @@ impl Qwen3TTSEngine {
         let max_steps = compute_max_steps(text);
         log::info!("Max decode steps for {} words: {}", text.split_whitespace().count(), max_steps);
         let t = std::time::Instant::now();
-        let frames = self.run_decode_loop(last_logits, last_hidden, kv_cache, kv_seq_len, max_steps)?;
+        let frames = self.run_decode_loop(
+            last_logits, last_hidden, kv_cache, kv_seq_len, max_steps,
+            &trailing_text_hidden,
+        )?;
         log::info!(
             "[3/5] Generated {} code frames ({} ms)",
             frames.len(),
@@ -378,12 +383,16 @@ impl Qwen3TTSEngine {
     ///
     /// Layout: [role(3), mixed(5), text+eos(T+1), final(1)] = T+10 positions
     ///
-    /// Returns (flat_embeddings, total_seq_len).
+    /// Returns (flat_embeddings, total_seq_len, trailing_text_hidden).
+    ///
+    /// `trailing_text_hidden` contains the raw text_project embeddings for the
+    /// T text tokens + tts_eos (T+1 total). These are drip-fed one per decode
+    /// step to maintain text–audio alignment (per the reference implementation).
     fn build_prompt_embeddings(
         &mut self,
         text: &str,
         voice_id: &str,
-    ) -> Result<(Vec<f32>, usize), String> {
+    ) -> Result<(Vec<f32>, usize, Vec<f32>), String> {
         let h = self.config.hidden_size;
         let cfg = &self.config;
 
@@ -475,7 +484,13 @@ impl Qwen3TTSEngine {
             }
         }
 
-        Ok((final_embeds, total_len))
+        // Extract trailing_text_hidden: text_project outputs for text tokens + tts_eos
+        // These are positions 8..8+text_len (text) + position 8+text_len (tts_eos) = T+1 embeds
+        let trailing_start = 8 * h;
+        let trailing_end = (8 + text_len + 1) * h;
+        let trailing_text_hidden = text_embeds[trailing_start..trailing_end].to_vec();
+
+        Ok((final_embeds, total_len, trailing_text_hidden))
     }
 
     // ── Prefill ───────────────────────────────────────────────────
@@ -553,11 +568,13 @@ impl Qwen3TTSEngine {
     /// Run the autoregressive decode loop, producing codec frames.
     /// Each frame is [first_code, predicted_code_0..14] = 16 codes.
     ///
-    /// Optimizations over the naive approach:
-    /// - KV cache is kept as an owned `DynValue` and passed directly between
-    ///   session runs, avoiding a full f32 copy every step (~115 MB at step 500).
-    /// - code_predictor_embed inner loop reuses pre-allocated tensor buffers
-    ///   instead of allocating new ones per group.
+    /// `trailing_text_hidden` contains T+1 text_project embeddings (text tokens + tts_eos).
+    /// At each decode step i, we add trailing_text_hidden[i] if i < len, else tts_pad_embed.
+    /// This "drip-feeds" text context into the decoder to maintain text–audio alignment.
+    ///
+    /// Optimizations:
+    /// - KV cache is kept as an owned `DynValue` (no f32 copy per step).
+    /// - code_predictor_embed inner loop reuses pre-allocated tensor buffers.
     fn run_decode_loop(
         &mut self,
         initial_logits: Vec<f32>,
@@ -565,6 +582,7 @@ impl Qwen3TTSEngine {
         initial_kv: DynValue,
         initial_kv_len: usize,
         max_steps: usize,
+        trailing_text_hidden: &[f32],
     ) -> Result<Vec<[i64; 16]>, String> {
         let h = self.config.hidden_size;
         let cfg = &self.config;
@@ -686,9 +704,17 @@ impl Qwen3TTSEngine {
                 }
             }
 
-            // 6. Add trailing text hidden (tts_pad_embed for non-streaming)
-            for j in 0..h {
-                total_embed[j] += self.tts_pad_embed[j];
+            // 6. Add trailing text hidden: drip-feed text_project embeddings per step
+            let trailing_count = trailing_text_hidden.len() / h;
+            if step < trailing_count {
+                let offset = step * h;
+                for j in 0..h {
+                    total_embed[j] += trailing_text_hidden[offset + j];
+                }
+            } else {
+                for j in 0..h {
+                    total_embed[j] += self.tts_pad_embed[j];
+                }
             }
 
             // 7. Run talker_decode — pass KV cache as DynValue directly (no f32 copy)
