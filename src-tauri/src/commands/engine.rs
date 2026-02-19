@@ -13,6 +13,12 @@ fn ensure_engine_state(app: &AppHandle) {
 /// Resolve the models directory for the given model_id.
 /// Checks bundled resources first, then user's app data models dir.
 pub fn resolve_model_dir(app: &AppHandle, model_id: &str) -> Result<PathBuf, String> {
+    // Dev-only: safetensors variant shares the same directory as qwen3-tts
+    #[cfg(debug_assertions)]
+    if model_id == "qwen3-tts-safetensors" {
+        return resolve_model_dir(app, "qwen3-tts");
+    }
+
     // 1. Dev mode: project-relative bundled resources
     #[cfg(debug_assertions)]
     {

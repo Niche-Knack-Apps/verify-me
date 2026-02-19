@@ -163,7 +163,7 @@ pub async fn get_voices(app: AppHandle, _model_id: String) -> Result<Vec<VoiceIn
     ensure_engine_state(&app);
     let state: State<'_, EngineState> = app.state();
 
-    let engine = state.0.lock().unwrap_or_else(|e| {
+    let mut engine = state.0.lock().unwrap_or_else(|e| {
         log::warn!("Recovering from poisoned engine lock");
         e.into_inner()
     });

@@ -2,12 +2,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::services::pocket_tts::PocketTTSEngine;
+#[cfg(debug_assertions)]
+use crate::services::python_engine::PythonEngine;
 use crate::services::qwen3_tts::Qwen3TTSEngine;
 
 /// Which TTS backend is currently loaded.
 enum ActiveEngine {
     PocketTTS(PocketTTSEngine),
     Qwen3TTS(Qwen3TTSEngine),
+    #[cfg(debug_assertions)]
+    Qwen3Safetensors(PythonEngine),
 }
 
 /// Manages the ONNX inference engine lifecycle.
@@ -49,6 +53,16 @@ impl OnnxEngine {
         let engine = if model_id == "pocket-tts" {
             let pocket = PocketTTSEngine::initialize(model_dir)?;
             ActiveEngine::PocketTTS(pocket)
+        } else if model_id == "qwen3-tts-safetensors" {
+            #[cfg(debug_assertions)]
+            {
+                let python = PythonEngine::initialize(model_dir)?;
+                ActiveEngine::Qwen3Safetensors(python)
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                return Err("Safetensors model is only available in dev builds".into());
+            }
         } else if model_id.starts_with("qwen3-tts") {
             let qwen3 = Qwen3TTSEngine::initialize(model_dir)?;
             ActiveEngine::Qwen3TTS(qwen3)
@@ -79,6 +93,10 @@ impl OnnxEngine {
             Some(ActiveEngine::Qwen3TTS(engine)) => {
                 engine.generate_speech(text, voice, speed, output_path)
             }
+            #[cfg(debug_assertions)]
+            Some(ActiveEngine::Qwen3Safetensors(engine)) => {
+                engine.generate_speech(text, voice, speed, output_path)
+            }
             None => Err("Engine not initialized".into()),
         }
     }
@@ -97,15 +115,21 @@ impl OnnxEngine {
             Some(ActiveEngine::Qwen3TTS(engine)) => {
                 engine.clone_voice(text, reference_audio, output_path)
             }
+            #[cfg(debug_assertions)]
+            Some(ActiveEngine::Qwen3Safetensors(engine)) => {
+                engine.clone_voice(text, reference_audio, output_path)
+            }
             None => Err("Engine not initialized".into()),
         }
     }
 
     /// Get available voices for the current model.
-    pub fn get_voices(&self) -> Result<Vec<String>, String> {
-        match self.engine.as_ref() {
+    pub fn get_voices(&mut self) -> Result<Vec<String>, String> {
+        match self.engine.as_mut() {
             Some(ActiveEngine::PocketTTS(engine)) => Ok(engine.get_available_voices()),
             Some(ActiveEngine::Qwen3TTS(engine)) => Ok(engine.get_available_voices()),
+            #[cfg(debug_assertions)]
+            Some(ActiveEngine::Qwen3Safetensors(engine)) => engine.get_voices(),
             None => Err("Engine not initialized".into()),
         }
     }
