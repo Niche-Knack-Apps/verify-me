@@ -13,10 +13,18 @@ fn ensure_engine_state(app: &AppHandle) {
 /// Resolve the models directory for the given model_id.
 /// Checks bundled resources first, then user's app data models dir.
 pub fn resolve_model_dir(app: &AppHandle, model_id: &str) -> Result<PathBuf, String> {
-    // Dev-only: safetensors variant shares the same directory as qwen3-tts
+    // Dev-only: safetensors variant needs the HF-downloaded qwen3-tts directory
+    // (NOT the onnx/ exports which lack safetensors weights).
     #[cfg(debug_assertions)]
     if model_id == "qwen3-tts-safetensors" {
-        return resolve_model_dir(app, "qwen3-tts");
+        let app_data_models = path_service::get_models_dir()?;
+        let safetensors_dir = app_data_models.join("qwen3-tts");
+        if safetensors_dir.is_dir() {
+            return Ok(safetensors_dir);
+        }
+        return Err(
+            "Safetensors model not found. Download qwen3-tts from HuggingFace first.".into(),
+        );
     }
 
     // 1. Dev mode: project-relative bundled resources
