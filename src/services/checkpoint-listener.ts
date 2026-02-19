@@ -34,8 +34,7 @@ export async function initCheckpointListener(): Promise<void> {
     // Log full checkpoint data to debug logger (persisted to IndexedDB, included in exports)
     const logger = getLogger();
     if (logger) {
-      const dataStr = JSON.stringify(cp.data, null, 2);
-      logger.log('debug', `[CHECKPOINT:${cp.engine}] ${cp.stage}:\n${dataStr}`, {
+      logger.log('debug', `[CHECKPOINT:${cp.engine}] ${cp.stage}`, {
         source: 'checkpoint',
         checkpointEngine: cp.engine,
         checkpointStage: cp.stage,
