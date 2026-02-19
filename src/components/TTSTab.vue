@@ -65,16 +65,21 @@ const settings = useSettingsStore();
 
       <div class="control-group">
         <label class="field-label">
-          {{ settings.isEighties ? `> SPEED: ${tts.speed.toFixed(1)}x` : `Speed: ${tts.speed.toFixed(1)}x` }}
+          {{ settings.isEighties ? '> SPEED' : 'Speed' }}
         </label>
-        <input
-          type="range"
-          class="speed-slider"
-          min="0.5"
-          max="2.0"
-          step="0.1"
-          v-model.number="tts.speed"
-        />
+        <div class="speed-stepper">
+          <button
+            class="stepper-btn"
+            :disabled="tts.speed <= 0.5"
+            @click="tts.speed = Math.round((tts.speed - 0.1) * 10) / 10"
+          >−</button>
+          <span class="stepper-value">{{ tts.speed.toFixed(1) }}x</span>
+          <button
+            class="stepper-btn"
+            :disabled="tts.speed >= 2.0"
+            @click="tts.speed = Math.round((tts.speed + 0.1) * 10) / 10"
+          >+</button>
+        </div>
       </div>
     </div>
 
@@ -97,10 +102,10 @@ const settings = useSettingsStore();
       @click="tts.generateSpeech()"
     >
       <template v-if="tts.isGenerating">
-        <span v-if="settings.isEighties" class="spinner-text">[||||] GENERATING...</span>
+        <span v-if="settings.isEighties" class="spinner-text">[||||] GENERATING... {{ tts.generatingElapsed }}s</span>
         <template v-else>
           <svg class="spinner-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-          Generating...
+          Generating... {{ tts.generatingElapsed }}s
         </template>
       </template>
       <template v-else>
@@ -287,9 +292,72 @@ const settings = useSettingsStore();
   text-shadow: var(--app-glow);
 }
 
-.speed-slider {
-  width: 100%;
+.speed-stepper {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+  overflow: hidden;
   min-height: 44px;
+}
+
+.stepper-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  min-height: 44px;
+  font-family: var(--app-font);
+  font-size: 1.25rem;
+  font-weight: 600;
+  background: var(--app-surface);
+  color: var(--app-text);
+  border: none;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s;
+}
+
+.stepper-btn:hover:not(:disabled) {
+  background: var(--app-border);
+}
+
+.stepper-btn:active:not(:disabled) {
+  background: var(--app-accent);
+  color: #fff;
+}
+
+.stepper-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.stepper-value {
+  flex: 1;
+  text-align: center;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: var(--app-text);
+  padding: 0 0.5rem;
+}
+
+[data-theme="eighties"] .speed-stepper {
+  border-radius: 0;
+}
+
+[data-theme="eighties"] .stepper-btn {
+  font-weight: 400;
+  background: transparent;
+  color: var(--app-accent);
+}
+
+[data-theme="eighties"] .stepper-btn:hover:not(:disabled) {
+  background: rgba(51, 255, 0, 0.08);
+}
+
+[data-theme="eighties"] .stepper-value {
+  text-shadow: var(--app-glow);
 }
 
 .generate-btn {

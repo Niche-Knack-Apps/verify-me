@@ -34,18 +34,26 @@ export interface TTSModel {
 
 export const useModelsStore = defineStore('models', () => {
   const models = ref<TTSModel[]>([]);
+  const loadError = ref<string | null>(null);
   const downloadProgress = ref<Record<string, number>>({});
   const downloading = ref<string | null>(null);
   const downloadErrors = ref<Record<string, string>>({});
   const downloadFilename = ref<Record<string, string>>({});
 
   async function loadModels() {
+    loadError.value = null;
     try {
       if (isCapacitor()) {
         const ModelManager = await getModelManager();
+        console.log('[models] Calling ModelManager.listModels...');
         const result = await ModelManager.listModels();
+        console.log('[models] listModels raw result:', JSON.stringify(result));
+        const raw = result.models ?? [];
+        if (raw.length === 0) {
+          loadError.value = 'Plugin returned 0 models. Check logcat for ModelManager errors.';
+        }
         // Map from plugin format to TTSModel[]
-        models.value = (result.models ?? []).map((m: any) => ({
+        models.value = raw.map((m: any) => ({
           id: m.id,
           name: m.name,
           size: m.size,
@@ -61,8 +69,11 @@ export const useModelsStore = defineStore('models', () => {
         const result = await invoke<TTSModel[]>('list_models');
         models.value = result;
       }
-    } catch (e) {
-      console.error('Failed to load models:', e);
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      loadError.value = `Failed to load models: ${err.message}`;
+      console.error('[models] Failed to load models:', err.message);
+      console.error('[models] Stack:', err.stack);
     }
   }
 
@@ -203,6 +214,7 @@ export const useModelsStore = defineStore('models', () => {
 
   return {
     models,
+    loadError,
     downloadProgress,
     downloading,
     downloadErrors,

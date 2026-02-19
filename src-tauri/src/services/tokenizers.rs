@@ -244,6 +244,34 @@ impl BpeTokenizer {
         self.vocab.get(key).copied()
     }
 
+    /// Encode text with the Qwen3-TTS chat template.
+    /// Template: `<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n`
+    /// Special tokens are hardcoded IDs (not BPE-encoded).
+    pub fn encode_chat_prompt(&self, text: &str) -> Vec<i64> {
+        const IM_START: i64 = 151644;
+        const ASSISTANT: i64 = 77091;
+        const IM_END: i64 = 151645;
+        const NEWLINE: i64 = 198;
+
+        let text_tokens = self.tokenize(text);
+
+        let mut tokens = Vec::with_capacity(text_tokens.len() + 8);
+        // <|im_start|>assistant\n
+        tokens.push(IM_START);
+        tokens.push(ASSISTANT);
+        tokens.push(NEWLINE);
+        // {text}
+        tokens.extend_from_slice(&text_tokens);
+        // <|im_end|>\n<|im_start|>assistant\n
+        tokens.push(IM_END);
+        tokens.push(NEWLINE);
+        tokens.push(IM_START);
+        tokens.push(ASSISTANT);
+        tokens.push(NEWLINE);
+
+        tokens
+    }
+
     pub fn tokenize(&self, text: &str) -> Vec<i64> {
         let words = self.pre_tokenize(text);
 

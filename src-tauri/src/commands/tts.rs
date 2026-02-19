@@ -1,8 +1,12 @@
+use crate::commands::engine::ensure_engine_for_model;
 use crate::commands::models::VoiceInfo;
 use crate::services::onnx_engine::{EngineState, OnnxEngine};
 use crate::services::path_service;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
+
+/// Maximum time allowed for a single TTS generation before timeout.
+const GENERATION_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
 
 fn ensure_engine_state(app: &AppHandle) {
     if app.try_state::<EngineState>().is_none() {
@@ -33,28 +37,15 @@ fn generate_output_path(prefix: &str) -> Result<String, String> {
 pub async fn generate_speech(
     app: AppHandle,
     text: String,
-    _model_id: String,
+    model_id: String,
     voice: String,
     speed: Option<f32>,
     _voice_prompt: Option<String>,
     _voice_mode: Option<String>,
     _voice_description: Option<String>,
 ) -> Result<String, String> {
-    ensure_engine_state(&app);
-    let state: State<'_, EngineState> = app.state();
-
-    // Check engine is running before spawning the blocking task
-    {
-        let engine = state.0.lock().unwrap_or_else(|e| {
-            log::warn!("Recovering from poisoned engine lock");
-            e.into_inner()
-        });
-        if !engine.is_running() {
-            return Err(
-                "Engine is not running. Open Settings to start the engine.".into(),
-            );
-        }
-    }
+    // Auto-switch engine to the requested model if needed
+    ensure_engine_for_model(&app, &model_id)?;
 
     let output_path = generate_output_path("tts")?;
     let speed = speed.unwrap_or(1.0);
@@ -66,20 +57,30 @@ pub async fn generate_speech(
         &text[..std::cmp::min(text.len(), 50)]
     );
 
-    // Run inference on a blocking thread so the Tauri event loop stays responsive
+    // Run inference on a blocking thread with a timeout so the UI doesn't spin forever
     let engine_state = app.state::<EngineState>().inner().clone();
     let output_clone = output_path.clone();
 
-    tokio::task::spawn_blocking(move || {
+    let task = tokio::task::spawn_blocking(move || {
         let mut engine = engine_state.0.lock().unwrap_or_else(|e| {
             log::warn!("Recovering from poisoned engine lock (blocking)");
             e.into_inner()
         });
 
         engine.generate_speech(&text, &voice, speed, std::path::Path::new(&output_clone))
-    })
-    .await
-    .map_err(|e| format!("Speech generation task panicked: {}", e))??;
+    });
+
+    match tokio::time::timeout(GENERATION_TIMEOUT, task).await {
+        Ok(join_result) => {
+            join_result.map_err(|e| format!("Speech generation task panicked: {}", e))??;
+        }
+        Err(_) => {
+            return Err(format!(
+                "Speech generation timed out after {}s. The model may be too large for CPU inference — try Pocket TTS or quantized models.",
+                GENERATION_TIMEOUT.as_secs()
+            ));
+        }
+    }
 
     log::info!("Speech generated: {}", output_path);
     Ok(output_path)
@@ -90,36 +91,22 @@ pub async fn voice_clone(
     app: AppHandle,
     text: String,
     reference_audio: String,
-    _model_id: String,
+    model_id: String,
 ) -> Result<String, String> {
-    ensure_engine_state(&app);
-    let state: State<'_, EngineState> = app.state();
-
-    // Check engine is running before spawning the blocking task
-    {
-        let engine = state.0.lock().unwrap_or_else(|e| {
-            log::warn!("Recovering from poisoned engine lock");
-            e.into_inner()
-        });
-        if !engine.is_running() {
-            return Err(
-                "Engine is not running. Open Settings to start the engine.".into(),
-            );
-        }
-    }
+    // Auto-switch engine to the requested model if needed
+    ensure_engine_for_model(&app, &model_id)?;
 
     let output_path = generate_output_path("clone")?;
 
     log::info!("Voice clone request: ref={}, text={}...", reference_audio, &text[..std::cmp::min(text.len(), 50)]);
 
-    // Run inference on a blocking thread so the Tauri event loop stays responsive.
-    // This prevents the UI from freezing during the (potentially long) clone operation.
+    // Run inference on a blocking thread with a timeout
     let engine_state = app.state::<EngineState>().inner().clone();
     let text_clone = text.clone();
     let ref_audio_clone = reference_audio.clone();
     let output_clone = output_path.clone();
 
-    tokio::task::spawn_blocking(move || {
+    let task = tokio::task::spawn_blocking(move || {
         let mut engine = engine_state.0.lock().unwrap_or_else(|e| {
             log::warn!("Recovering from poisoned engine lock (blocking)");
             e.into_inner()
@@ -130,9 +117,19 @@ pub async fn voice_clone(
             std::path::Path::new(&ref_audio_clone),
             std::path::Path::new(&output_clone),
         )
-    })
-    .await
-    .map_err(|e| format!("Voice clone task panicked: {}", e))??;
+    });
+
+    match tokio::time::timeout(GENERATION_TIMEOUT, task).await {
+        Ok(join_result) => {
+            join_result.map_err(|e| format!("Voice clone task panicked: {}", e))??;
+        }
+        Err(_) => {
+            return Err(format!(
+                "Voice cloning timed out after {}s. The model may be too large for CPU inference — try Pocket TTS or quantized models.",
+                GENERATION_TIMEOUT.as_secs()
+            ));
+        }
+    }
 
     log::info!("Voice clone generated: {}", output_path);
     Ok(output_path)

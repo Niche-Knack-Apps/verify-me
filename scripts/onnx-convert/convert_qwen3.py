@@ -244,8 +244,14 @@ def export_onnx(
     output_names: list[str],
     dynamic_axes: dict | None = None,
     opset: int | None = None,
+    skip_existing: bool = False,
 ) -> None:
     """Export a PyTorch module to ONNX format."""
+    if skip_existing and output_path.exists() and output_path.stat().st_size > 0:
+        size_mb = output_path.stat().st_size / (1024 * 1024)
+        logger.info("  SKIP: %s already exists (%.1f MB)", output_path.name, size_mb)
+        return
+
     if opset is None:
         opset = opset_version
 
@@ -377,6 +383,7 @@ def convert_variant(
     output_dir: Path,
     variant: str,
     do_quantize: bool = False,
+    skip_existing: bool = False,
 ) -> None:
     """Convert a single Qwen3 TTS variant to ONNX files."""
 
@@ -385,6 +392,7 @@ def convert_variant(
     logger.info("  Model dir:  %s", model_dir)
     logger.info("  Output dir: %s", output_dir)
     logger.info("  Quantize:   %s", do_quantize)
+    logger.info("  Skip exist: %s", skip_existing)
     logger.info("=" * 70)
 
     if not model_dir.exists():
@@ -396,6 +404,8 @@ def convert_variant(
     talker = model.talker  # Qwen3TTSTalkerForConditionalGeneration
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    _skip = skip_existing  # local alias for export calls
 
     # ---- 1. text_project.onnx ----
     # Combines text_embedding + text_projection
@@ -417,6 +427,7 @@ def convert_variant(
             "text_ids": {0: "batch", 1: "seq_len"},
             "projected": {0: "batch", 1: "seq_len"},
         },
+        skip_existing=_skip,
     )
 
     # ---- 2. codec_embed.onnx ----
@@ -436,6 +447,7 @@ def convert_variant(
             "codec_ids": {0: "batch", 1: "seq_len"},
             "embedded": {0: "batch", 1: "seq_len"},
         },
+        skip_existing=_skip,
     )
 
     # ---- 3. talker_prefill.onnx ----
@@ -479,6 +491,7 @@ def convert_variant(
             "logits": {0: "batch", 1: "seq_len"},
             "hidden_states": {0: "batch", 1: "seq_len"},
         },
+        skip_existing=_skip,
     )
 
     # ---- 4. talker_decode.onnx ----
@@ -518,6 +531,7 @@ def convert_variant(
             "logits": {0: "batch", 1: "seq_len"},
             "hidden_states": {0: "batch", 1: "seq_len"},
         },
+        skip_existing=_skip,
     )
 
     # ---- 5. code_predictor.onnx ----
@@ -539,6 +553,7 @@ def convert_variant(
             "all_logits": {0: "batch", 1: "seq_len"},
             "hidden_states": {0: "batch", 1: "seq_len"},
         },
+        skip_existing=_skip,
     )
 
     # ---- 6. code_predictor_embed.onnx ----
@@ -559,6 +574,7 @@ def convert_variant(
             "token_ids": {0: "batch", 1: "seq_len"},
             "embedded": {0: "batch", 1: "seq_len"},
         },
+        skip_existing=_skip,
     )
 
     # ---- 7 & 8. Speech tokenizer ONNX ----
@@ -593,6 +609,7 @@ def convert_variant(
                 "input_values": {0: "batch", 2: "samples"},
                 "audio_codes": {1: "batch", 2: "codes_len"},
             },
+            skip_existing=_skip,
         )
 
         # 8. tokenizer12hz_decode.onnx
@@ -623,6 +640,7 @@ def convert_variant(
                 "audio_codes": {0: "batch", 2: "codes_len"},
                 "audio_values": {0: "batch", 2: "samples"},
             },
+            skip_existing=_skip,
         )
     else:
         logger.warning("Skipping speech tokenizer export (not found)")
@@ -645,6 +663,7 @@ def convert_variant(
                 "mel_spectrogram": {0: "batch", 1: "time"},
                 "speaker_embedding": {0: "batch"},
             },
+            skip_existing=_skip,
         )
     else:
         logger.info("[9/9] speaker_encoder.onnx -- SKIPPED (not present in %s variant)", variant)
@@ -754,6 +773,11 @@ Examples:
         help="Produce INT8 quantized variants (_q suffix) via dynamic quantization on MatMul ops.",
     )
     parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip export of ONNX files that already exist in the output directory. Useful for resuming after OOM crashes.",
+    )
+    parser.add_argument(
         "--opset",
         type=int,
         default=_DEFAULT_OPSET,
@@ -788,6 +812,7 @@ Examples:
             output_dir=output_dir,
             variant=variant,
             do_quantize=args.quantize,
+            skip_existing=args.skip_existing,
         )
 
     logger.info("")

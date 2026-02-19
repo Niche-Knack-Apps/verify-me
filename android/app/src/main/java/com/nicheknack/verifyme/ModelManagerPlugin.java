@@ -106,6 +106,8 @@ public class ModelManagerPlugin extends Plugin {
     public void listModels(PluginCall call) {
         // No extraction here — return the catalog instantly
         File modelsDir = getModelsDir();
+        Log.i(TAG, "listModels called, modelsDir=" + modelsDir.getAbsolutePath()
+            + " exists=" + modelsDir.exists());
         JSArray result = new JSArray();
 
         for (ModelEntry entry : KNOWN_MODELS) {
@@ -140,8 +142,10 @@ public class ModelManagerPlugin extends Plugin {
             }
 
             result.put(model);
+            Log.i(TAG, "  model: " + entry.id + " status=" + model.optString("status"));
         }
 
+        Log.i(TAG, "listModels returning " + result.length() + " models");
         JSObject ret = new JSObject();
         ret.put("models", result);
         call.resolve(ret);

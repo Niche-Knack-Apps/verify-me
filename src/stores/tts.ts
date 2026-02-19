@@ -6,6 +6,7 @@ import type { Voice } from './models';
 // Non-reactive recording internals
 let durationInterval: ReturnType<typeof setInterval> | null = null;
 let levelPollInterval: ReturnType<typeof setInterval> | null = null;
+let generatingTimer: ReturnType<typeof setInterval> | null = null;
 
 function isCapacitor(): boolean {
   return 'Capacitor' in window;
@@ -32,6 +33,7 @@ export const useTTSStore = defineStore('tts', () => {
   const speed = ref(1.0);
   const outputAudioPath = ref<string | null>(null);
   const isGenerating = ref(false);
+  const generatingElapsed = ref(0);
   const error = ref<string | null>(null);
   const initializedModelId = ref<string | null>(null);
 
@@ -205,7 +207,12 @@ export const useTTSStore = defineStore('tts', () => {
   async function generateSpeech() {
     if (!text.value.trim()) return;
     isGenerating.value = true;
+    generatingElapsed.value = 0;
     error.value = null;
+    const startTime = Date.now();
+    generatingTimer = setInterval(() => {
+      generatingElapsed.value = Math.floor((Date.now() - startTime) / 1000);
+    }, 1000);
     try {
       if (isCapacitor()) {
         await ensureEngineInitialized();
@@ -257,6 +264,10 @@ export const useTTSStore = defineStore('tts', () => {
     } catch (e) {
       error.value = String(e);
     } finally {
+      if (generatingTimer !== null) {
+        clearInterval(generatingTimer);
+        generatingTimer = null;
+      }
       isGenerating.value = false;
     }
   }
@@ -264,7 +275,12 @@ export const useTTSStore = defineStore('tts', () => {
   async function cloneVoice() {
     if (!text.value.trim() || !referenceAudioPath.value) return;
     isGenerating.value = true;
+    generatingElapsed.value = 0;
     error.value = null;
+    const cloneStartTime = Date.now();
+    generatingTimer = setInterval(() => {
+      generatingElapsed.value = Math.floor((Date.now() - cloneStartTime) / 1000);
+    }, 1000);
     try {
       if (isCapacitor()) {
         await ensureEngineInitialized();
@@ -306,13 +322,17 @@ export const useTTSStore = defineStore('tts', () => {
     } catch (e) {
       error.value = String(e);
     } finally {
+      if (generatingTimer !== null) {
+        clearInterval(generatingTimer);
+        generatingTimer = null;
+      }
       isGenerating.value = false;
     }
   }
 
   return {
     text, selectedModelId, selectedVoice, voicePrompt, voiceMode, voiceDescription, speed,
-    outputAudioPath, isGenerating, error,
+    outputAudioPath, isGenerating, generatingElapsed, error,
     referenceAudioPath, isRecording, recordingDuration, currentLevel,
     selectedModel, voices,
     startRecording, stopRecording,

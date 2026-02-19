@@ -78,7 +78,12 @@ onMounted(() => {
         </button>
       </div>
       <div v-if="filteredModels.length === 0" class="no-models">
-        {{ settings.isEighties ? 'NO MODELS AVAILABLE' : 'No models available' }}
+        <template v-if="modelsStore.loadError">
+          <span class="load-error">{{ modelsStore.loadError }}</span>
+        </template>
+        <template v-else>
+          {{ settings.isEighties ? 'NO MODELS AVAILABLE' : 'No models available' }}
+        </template>
       </div>
     </div>
   </div>
@@ -238,5 +243,11 @@ onMounted(() => {
 
 [data-theme="eighties"] .no-models {
   font-size: 16px;
+}
+
+.load-error {
+  color: var(--app-error, #ef4444);
+  font-size: 0.8125rem;
+  word-break: break-word;
 }
 </style>
