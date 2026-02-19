@@ -117,6 +117,57 @@ static KNOWN_MODELS: &[CatalogEntry] = &[
     },
 ];
 
+#[cfg(debug_assertions)]
+static DEV_MODELS: &[CatalogEntry] = &[CatalogEntry {
+    id: "qwen3-tts-safetensors",
+    name: "Qwen 3 TTS (Safetensors) [DEV]",
+    size: "~27 GB",
+    supports_clone: true,
+    supports_voice_prompt: true,
+    supports_voice_design: true,
+    bundled: false,
+    download_url: None,
+    hf_repo: None,
+    voices: &[
+        StaticVoice {
+            id: "Aiden",
+            name: "Aiden (Male, American English)",
+        },
+        StaticVoice {
+            id: "Ryan",
+            name: "Ryan (Male, English)",
+        },
+        StaticVoice {
+            id: "Vivian",
+            name: "Vivian (Female, Chinese)",
+        },
+        StaticVoice {
+            id: "Serena",
+            name: "Serena (Female, Chinese)",
+        },
+        StaticVoice {
+            id: "Dylan",
+            name: "Dylan (Male, Chinese)",
+        },
+        StaticVoice {
+            id: "Eric",
+            name: "Eric (Male, Chinese/Sichuan)",
+        },
+        StaticVoice {
+            id: "Uncle_Fu",
+            name: "Uncle Fu (Male, Chinese)",
+        },
+        StaticVoice {
+            id: "Ono_Anna",
+            name: "Ono Anna (Female, Japanese)",
+        },
+        StaticVoice {
+            id: "Sohee",
+            name: "Sohee (Female, Korean)",
+        },
+    ],
+}];
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceInfo {
@@ -193,7 +244,12 @@ pub async fn list_models(app: AppHandle) -> Result<Vec<ModelInfo>, String> {
     let resource_dir: Option<std::path::PathBuf> = app.path().resource_dir().ok();
     let app_data_models = path_service::get_models_dir().ok();
 
-    let models = KNOWN_MODELS
+    #[cfg(debug_assertions)]
+    let all_models: Vec<&CatalogEntry> = KNOWN_MODELS.iter().chain(DEV_MODELS.iter()).collect();
+    #[cfg(not(debug_assertions))]
+    let all_models: Vec<&CatalogEntry> = KNOWN_MODELS.iter().collect();
+
+    let models = all_models
         .iter()
         .map(|entry| {
             let found = if entry.bundled {
