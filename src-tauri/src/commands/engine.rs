@@ -10,57 +10,9 @@ fn ensure_engine_state(app: &AppHandle) {
     }
 }
 
-/// Ensure the engine is running with the requested model.
-/// If it's already running with a different model, re-initialize.
-pub fn ensure_engine_for_model(app: &AppHandle, model_id: &str) -> Result<(), String> {
-    ensure_engine_state(app);
-    let state: State<'_, EngineState> = app.state();
-
-    let mut engine = state.0.lock().unwrap_or_else(|e| {
-        log::warn!("Recovering from poisoned engine lock");
-        e.into_inner()
-    });
-
-    // Already running with the right model?
-    if engine.is_running() {
-        if let Some(current) = engine.current_model_id() {
-            if current == model_id {
-                return Ok(());
-            }
-        }
-    }
-
-    // Need to (re-)initialize
-    let model_dir = resolve_model_dir(app, model_id)?;
-    log::info!(
-        "Auto-switching engine to model={}, dir={}",
-        model_id,
-        model_dir.display()
-    );
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        engine.initialize(model_id, &model_dir)
-    }));
-
-    match result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(panic) => {
-            let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = panic.downcast_ref::<&str>() {
-                s.to_string()
-            } else {
-                "Unknown panic during engine init".to_string()
-            };
-            Err(format!("ONNX Runtime failed to load: {}", msg))
-        }
-    }
-}
-
 /// Resolve the models directory for the given model_id.
 /// Checks bundled resources first, then user's app data models dir.
-fn resolve_model_dir(app: &AppHandle, model_id: &str) -> Result<PathBuf, String> {
+pub fn resolve_model_dir(app: &AppHandle, model_id: &str) -> Result<PathBuf, String> {
     // 1. Dev mode: project-relative bundled resources
     #[cfg(debug_assertions)]
     {

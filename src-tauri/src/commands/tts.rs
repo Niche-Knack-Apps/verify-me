@@ -1,4 +1,4 @@
-use crate::commands::engine::ensure_engine_for_model;
+use crate::commands::engine::resolve_model_dir;
 use crate::commands::models::VoiceInfo;
 use crate::services::onnx_engine::{EngineState, OnnxEngine};
 use crate::services::path_service;
@@ -44,20 +44,22 @@ pub async fn generate_speech(
     _voice_mode: Option<String>,
     _voice_description: Option<String>,
 ) -> Result<String, String> {
-    // Auto-switch engine to the requested model if needed
-    ensure_engine_for_model(&app, &model_id)?;
+    ensure_engine_state(&app);
 
+    // Pre-resolve model dir before entering the blocking task (needs AppHandle)
+    let model_dir = resolve_model_dir(&app, &model_id)?;
     let output_path = generate_output_path("tts")?;
     let speed = speed.unwrap_or(1.0);
 
     log::info!(
-        "Generating speech: voice={}, speed={}, text={}...",
+        "Generating speech: voice={}, speed={}, model={}, text={}...",
         voice,
         speed,
+        model_id,
         &text[..std::cmp::min(text.len(), 50)]
     );
 
-    // Run inference on a blocking thread with a timeout so the UI doesn't spin forever
+    // Single lock acquisition: check/switch model + run inference atomically
     let engine_state = app.state::<EngineState>().inner().clone();
     let output_clone = output_path.clone();
 
@@ -66,6 +68,16 @@ pub async fn generate_speech(
             log::warn!("Recovering from poisoned engine lock (blocking)");
             e.into_inner()
         });
+
+        // Ensure correct model is loaded (inside the lock to prevent races)
+        let needs_switch = match engine.current_model_id() {
+            Some(current) if current == model_id => false,
+            _ => true,
+        };
+        if needs_switch {
+            log::info!("Auto-switching engine to model={}", model_id);
+            engine.initialize(&model_id, &model_dir)?;
+        }
 
         engine.generate_speech(&text, &voice, speed, std::path::Path::new(&output_clone))
     });
@@ -93,14 +105,15 @@ pub async fn voice_clone(
     reference_audio: String,
     model_id: String,
 ) -> Result<String, String> {
-    // Auto-switch engine to the requested model if needed
-    ensure_engine_for_model(&app, &model_id)?;
+    ensure_engine_state(&app);
 
+    // Pre-resolve model dir before entering the blocking task (needs AppHandle)
+    let model_dir = resolve_model_dir(&app, &model_id)?;
     let output_path = generate_output_path("clone")?;
 
-    log::info!("Voice clone request: ref={}, text={}...", reference_audio, &text[..std::cmp::min(text.len(), 50)]);
+    log::info!("Voice clone request: model={}, ref={}, text={}...", model_id, reference_audio, &text[..std::cmp::min(text.len(), 50)]);
 
-    // Run inference on a blocking thread with a timeout
+    // Single lock acquisition: check/switch model + run inference atomically
     let engine_state = app.state::<EngineState>().inner().clone();
     let text_clone = text.clone();
     let ref_audio_clone = reference_audio.clone();
@@ -111,6 +124,16 @@ pub async fn voice_clone(
             log::warn!("Recovering from poisoned engine lock (blocking)");
             e.into_inner()
         });
+
+        // Ensure correct model is loaded (inside the lock to prevent races)
+        let needs_switch = match engine.current_model_id() {
+            Some(current) if current == model_id => false,
+            _ => true,
+        };
+        if needs_switch {
+            log::info!("Auto-switching engine to model={}", model_id);
+            engine.initialize(&model_id, &model_dir)?;
+        }
 
         engine.clone_voice(
             &text_clone,
