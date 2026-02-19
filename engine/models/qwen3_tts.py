@@ -148,12 +148,11 @@ class Qwen3TTSModel:
 
         return kwargs
 
-    def load(self, models_dir=None):
-        """Load the Qwen3 TTS CustomVoice model."""
+    def _load_custom_voice(self):
+        """Load the CustomVoice model into self._model."""
         from qwen_tts import Qwen3TTSModel as QwenModel
 
-        self._model_dir = models_dir
-        model_path = self._resolve_model_path(models_dir, "qwen3-tts", HF_REPO_CUSTOM_VOICE)
+        model_path = self._resolve_model_path(self._model_dir, "qwen3-tts", HF_REPO_CUSTOM_VOICE)
         kwargs = self._load_kwargs()
 
         emit_checkpoint("model_load", {
@@ -163,7 +162,6 @@ class Qwen3TTSModel:
         logger.info("Loading CustomVoice model from: %s", model_path)
         self._model = QwenModel.from_pretrained(model_path, **kwargs)
 
-        # Log model metadata
         tts_type = getattr(self._model.model, "tts_model_type", "unknown")
         tok_type = getattr(self._model.model, "tokenizer_type", "unknown")
         logger.info("Model loaded — tts_model_type=%s, tokenizer_type=%s", tts_type, tok_type)
@@ -177,10 +175,32 @@ class Qwen3TTSModel:
 
         logger.info("Qwen3 TTS CustomVoice ready")
 
+    def load(self, models_dir=None):
+        """Load the Qwen3 TTS CustomVoice model."""
+        self._model_dir = models_dir
+        self._load_custom_voice()
+
+    def _ensure_custom_voice_model(self):
+        """Reload the CustomVoice model if it was swapped out for another variant."""
+        if self._model is not None:
+            return
+
+        # Unload other models first to free memory
+        self._unload_model("base")
+        self._unload_model("voice_design")
+
+        logger.info("Re-loading CustomVoice model (was swapped out)")
+        self._load_custom_voice()
+
     def _ensure_base_model(self):
-        """Lazily load the Base model for voice cloning (separate from CustomVoice)."""
+        """Load the Base model for voice cloning, unloading others first to save memory."""
         if self._base_model is not None:
             return
+
+        # Unload other models first — each variant is ~1.7B params,
+        # keeping multiple loaded simultaneously causes OOM.
+        self._unload_model("custom_voice")
+        self._unload_model("voice_design")
 
         from qwen_tts import Qwen3TTSModel as QwenModel
 
@@ -197,9 +217,14 @@ class Qwen3TTSModel:
         logger.info("Qwen3 TTS Base ready for voice cloning")
 
     def _ensure_voice_design_model(self):
-        """Lazily load the VoiceDesign model for voice-from-description generation."""
+        """Load the VoiceDesign model, unloading others first to save memory."""
         if self._voice_design_model is not None:
             return
+
+        # Unload other models first — each variant is ~1.7B params,
+        # keeping multiple loaded simultaneously causes OOM.
+        self._unload_model("custom_voice")
+        self._unload_model("base")
 
         from qwen_tts import Qwen3TTSModel as QwenModel
 
@@ -215,33 +240,46 @@ class Qwen3TTSModel:
         logger.info("VoiceDesign model loaded — tts_model_type=%s", tts_type)
         logger.info("Qwen3 TTS VoiceDesign ready")
 
-    def unload(self):
-        """Unload models and free memory."""
-        if self._model is not None:
+    def _unload_model(self, which):
+        """Unload a specific model variant and free its memory.
+
+        Args:
+            which: one of "custom_voice", "base", "voice_design"
+        """
+        freed = False
+        if which == "custom_voice" and self._model is not None:
             del self._model
             self._model = None
-            logger.info("CustomVoice model unloaded")
-
-        if self._base_model is not None:
+            logger.info("CustomVoice model unloaded (swapping)")
+            freed = True
+        elif which == "base" and self._base_model is not None:
             del self._base_model
             self._base_model = None
-            logger.info("Base model unloaded")
-
-        if self._voice_design_model is not None:
+            logger.info("Base model unloaded (swapping)")
+            freed = True
+        elif which == "voice_design" and self._voice_design_model is not None:
             del self._voice_design_model
             self._voice_design_model = None
-            logger.info("VoiceDesign model unloaded")
+            logger.info("VoiceDesign model unloaded (swapping)")
+            freed = True
 
+        if freed:
+            import gc
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    logger.info("CUDA cache cleared after unload")
+            except ImportError:
+                pass
+
+    def unload(self):
+        """Unload all models and free memory."""
+        self._unload_model("custom_voice")
+        self._unload_model("base")
+        self._unload_model("voice_design")
         self._model_dir = None
-
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                logger.info("CUDA cache cleared")
-        except ImportError:
-            pass
 
     def generate(self, text, voice="Aiden", speed=1.0, output_path="output.wav",
                  voice_prompt=None, voice_mode=None, voice_description=None):
@@ -298,8 +336,7 @@ class Qwen3TTSModel:
 
     def _generate_custom_voice(self, text, voice, speed, output_path, voice_prompt):
         """Generate speech using the CustomVoice model (predefined speaker + instructions)."""
-        if not self._model:
-            raise RuntimeError("Model not loaded")
+        self._ensure_custom_voice_model()
 
         logger.info(
             "=== TTS Generate (CustomVoice) ===\n"
@@ -398,7 +435,13 @@ class Qwen3TTSModel:
         return output_path
 
     def clone_from_audio(self, reference_audio, text, output_path):
-        """Clone a voice from reference audio using the Base model's generate_voice_clone."""
+        """Clone a voice from reference audio using the Base model's generate_voice_clone.
+
+        Reference audio is trimmed to MAX_REF_SECONDS (default 15s) to prevent
+        OOM — the model only needs 3-20s of clean speech for good cloning.
+        """
+        MAX_REF_SECONDS = 15
+
         logger.info(
             "=== Voice Clone ===\n"
             "  ref_audio: %s\n"
@@ -410,6 +453,10 @@ class Qwen3TTSModel:
             output_path,
         )
 
+        # Trim reference audio to avoid OOM on long recordings.
+        # Qwen3-TTS only needs 3-20s; longer audio wastes memory and can hang.
+        trimmed_path = self._trim_reference_audio(reference_audio, MAX_REF_SECONDS)
+
         # Voice cloning requires the Base model variant
         self._ensure_base_model()
 
@@ -420,14 +467,45 @@ class Qwen3TTSModel:
         wavs, sample_rate = self._base_model.generate_voice_clone(
             text=text,
             language=None,
-            ref_audio=reference_audio,
+            ref_audio=trimmed_path,
             x_vector_only_mode=True,
             non_streaming_mode=True,
         )
 
         logger.info("Clone complete: %d samples, %d Hz", len(wavs[0]), sample_rate)
+
+        # Clean up trimmed temp file if we created one
+        if trimmed_path != reference_audio:
+            try:
+                os.remove(trimmed_path)
+            except OSError:
+                pass
+
         _write_wav(wavs, sample_rate, output_path)
         return output_path
+
+    @staticmethod
+    def _trim_reference_audio(audio_path, max_seconds):
+        """Trim reference audio to max_seconds. Returns original path if already short enough."""
+        import soundfile as sf_read
+
+        info = sf_read.info(audio_path)
+        duration = info.duration
+        logger.info("Reference audio: %.1fs, %d Hz, %d channels", duration, info.samplerate, info.channels)
+
+        if duration <= max_seconds:
+            return audio_path
+
+        logger.info("Trimming reference audio from %.1fs to %ds", duration, max_seconds)
+        max_frames = int(max_seconds * info.samplerate)
+        data, sr = sf_read.read(audio_path, frames=max_frames, dtype="float32")
+
+        # Write trimmed audio to a temp file
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        sf_read.write(tmp.name, data, sr, subtype="PCM_16")
+        logger.info("Trimmed reference saved to: %s (%.1fs)", tmp.name, max_seconds)
+        return tmp.name
 
     def get_voices(self):
         """Return available voices (speakers)."""
