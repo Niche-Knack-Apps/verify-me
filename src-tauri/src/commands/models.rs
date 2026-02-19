@@ -200,6 +200,16 @@ struct DownloadProgress {
     percent: f32,
 }
 
+/// Map a catalog model_id to the actual on-disk directory name.
+/// Most models use their ID directly; the dev-only safetensors variant
+/// shares the qwen3-tts directory.
+fn disk_model_id(model_id: &str) -> &str {
+    match model_id {
+        "qwen3-tts-safetensors" => "qwen3-tts",
+        other => other,
+    }
+}
+
 /// Check if a model exists in the given directory.
 fn model_exists_in_dir(dir: &std::path::Path, model_id: &str) -> bool {
     let candidate = dir.join(model_id);
@@ -252,21 +262,37 @@ pub async fn list_models(app: AppHandle) -> Result<Vec<ModelInfo>, String> {
     let models = all_models
         .iter()
         .map(|entry| {
+            // The on-disk directory name may differ from the catalog ID.
+            // qwen3-tts-safetensors shares the qwen3-tts directory.
+            let disk_id = disk_model_id(entry.id);
+
             let found = if entry.bundled {
                 true
             } else {
                 let mut on_disk = false;
 
+                // Check bundled resources
                 if let Some(ref res_dir) = resource_dir {
                     let bundled_dir = res_dir.join("models");
-                    if bundled_dir.exists() && model_exists_in_dir(&bundled_dir, entry.id) {
+                    if bundled_dir.exists() && model_exists_in_dir(&bundled_dir, disk_id) {
                         on_disk = true;
                     }
                 }
 
+                // Check app_data/models/{disk_id}/
                 if !on_disk {
                     if let Some(ref models_dir) = app_data_models {
-                        if model_exists_in_dir(models_dir, entry.id) {
+                        if model_exists_in_dir(models_dir, disk_id) {
+                            on_disk = true;
+                        }
+                    }
+                }
+
+                // Check app_data/models/onnx/{disk_id}/ (ONNX exports)
+                if !on_disk {
+                    if let Some(ref models_dir) = app_data_models {
+                        let onnx_dir = models_dir.join("onnx");
+                        if onnx_dir.exists() && model_exists_in_dir(&onnx_dir, disk_id) {
                             on_disk = true;
                         }
                     }
