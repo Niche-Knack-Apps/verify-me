@@ -188,24 +188,37 @@ impl PythonEngine {
         voice: &str,
         speed: f32,
         output_path: &Path,
+        voice_prompt: Option<&str>,
+        voice_mode: Option<&str>,
+        voice_description: Option<&str>,
     ) -> Result<(), String> {
         log::info!(
-            "[python] generate_speech: voice={}, speed={}, text=\"{}\"",
+            "[python] generate_speech: voice={}, speed={}, mode={:?}, text=\"{}\"",
             voice,
             speed,
+            voice_mode,
             &text[..std::cmp::min(text.len(), 80)]
         );
 
-        let result = self.rpc_call(
-            "tts.generate",
-            serde_json::json!({
-                "text": text,
-                "model_id": "qwen3-tts",
-                "voice": voice,
-                "speed": speed,
-                "output_path": output_path.to_string_lossy(),
-            }),
-        )?;
+        let mut params = serde_json::json!({
+            "text": text,
+            "model_id": "qwen3-tts",
+            "voice": voice,
+            "speed": speed,
+            "output_path": output_path.to_string_lossy().to_string(),
+        });
+
+        if let Some(vp) = voice_prompt {
+            params["voice_prompt"] = serde_json::Value::String(vp.to_string());
+        }
+        if let Some(vm) = voice_mode {
+            params["voice_mode"] = serde_json::Value::String(vm.to_string());
+        }
+        if let Some(vd) = voice_description {
+            params["voice_description"] = serde_json::Value::String(vd.to_string());
+        }
+
+        let result = self.rpc_call("tts.generate", params)?;
 
         log::info!("[python] generate_speech result: {}", result);
         Ok(())

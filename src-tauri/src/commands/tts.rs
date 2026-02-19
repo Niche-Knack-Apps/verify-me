@@ -40,9 +40,9 @@ pub async fn generate_speech(
     model_id: String,
     voice: String,
     speed: Option<f32>,
-    _voice_prompt: Option<String>,
-    _voice_mode: Option<String>,
-    _voice_description: Option<String>,
+    voice_prompt: Option<String>,
+    voice_mode: Option<String>,
+    voice_description: Option<String>,
 ) -> Result<String, String> {
     ensure_engine_state(&app);
 
@@ -86,6 +86,9 @@ pub async fn generate_speech(
             &text, &voice, speed,
             std::path::Path::new(&output_clone),
             Some(&checkpoint_tx),
+            voice_prompt.as_deref(),
+            voice_mode.as_deref(),
+            voice_description.as_deref(),
         )
     });
 
