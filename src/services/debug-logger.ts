@@ -322,6 +322,10 @@ export class DebugLogger {
         const level = log.level.toUpperCase().padEnd(5);
         let line = `[${ts}] [${level}] ${log.message}`;
         if (log.stack) line += `\n${log.stack}`;
+        // Include full checkpoint data in exports for offline analysis
+        if (log.checkpointData) {
+          line += `\n  checkpoint_data: ${JSON.stringify(log.checkpointData, null, 2).split('\n').join('\n  ')}`;
+        }
         return line;
       }).join('\n');
     return header + body;

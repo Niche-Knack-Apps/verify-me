@@ -31,13 +31,15 @@ export async function initCheckpointListener(): Promise<void> {
     const cp = event.payload;
     checkpoints.push(cp);
 
-    // Log to debug logger
+    // Log full checkpoint data to debug logger (persisted to IndexedDB, included in exports)
     const logger = getLogger();
     if (logger) {
-      const dataStr = JSON.stringify(cp.data, null, 0);
-      const truncated = dataStr.length > 200 ? dataStr.slice(0, 200) + '...' : dataStr;
-      logger.log('debug', `[CHECKPOINT:${cp.engine}] ${cp.stage}: ${truncated}`, {
+      const dataStr = JSON.stringify(cp.data, null, 2);
+      logger.log('debug', `[CHECKPOINT:${cp.engine}] ${cp.stage}:\n${dataStr}`, {
         source: 'checkpoint',
+        checkpointEngine: cp.engine,
+        checkpointStage: cp.stage,
+        checkpointData: cp.data,
       });
     }
   });

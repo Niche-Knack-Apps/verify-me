@@ -92,22 +92,25 @@ pub async fn generate_speech(
         )
     });
 
-    match tokio::time::timeout(GENERATION_TIMEOUT, task).await {
+    let result = match tokio::time::timeout(GENERATION_TIMEOUT, task).await {
         Ok(join_result) => {
-            join_result.map_err(|e| format!("Speech generation task panicked: {}", e))??;
+            join_result.map_err(|e| format!("Speech generation task panicked: {}", e))?
         }
         Err(_) => {
-            return Err(format!(
+            Err(format!(
                 "Speech generation timed out after {}s. The model may be too large for CPU inference — try Pocket TTS or quantized models.",
                 GENERATION_TIMEOUT.as_secs()
-            ));
+            ))
         }
-    }
+    };
 
-    // Drain and emit checkpoint events to the frontend
+    // Always drain checkpoint events (even on error — partial checkpoints aid debugging)
     while let Ok(checkpoint) = checkpoint_rx.try_recv() {
         let _ = app.emit("tts-checkpoint", &checkpoint);
     }
+
+    // Propagate any generation error after draining checkpoints
+    result?;
 
     log::info!("Speech generated: {}", output_path);
     Ok(output_path)
