@@ -86,16 +86,37 @@ impl OnnxEngine {
         speed: f32,
         output_path: &Path,
     ) -> Result<(), String> {
+        self.generate_speech_with_checkpoints(text, voice, speed, output_path, None)
+    }
+
+    /// Generate speech with optional checkpoint channel for debugging.
+    pub fn generate_speech_with_checkpoints(
+        &mut self,
+        text: &str,
+        voice: &str,
+        speed: f32,
+        output_path: &Path,
+        checkpoint_tx: Option<&std::sync::mpsc::Sender<serde_json::Value>>,
+    ) -> Result<(), String> {
         match self.engine.as_mut() {
             Some(ActiveEngine::PocketTTS(engine)) => {
                 engine.generate_speech(text, voice, speed, output_path)
             }
             Some(ActiveEngine::Qwen3TTS(engine)) => {
-                engine.generate_speech(text, voice, speed, output_path)
+                engine.generate_speech_with_checkpoints(
+                    text, voice, speed, output_path, checkpoint_tx,
+                )
             }
             #[cfg(debug_assertions)]
             Some(ActiveEngine::Qwen3Safetensors(engine)) => {
-                engine.generate_speech(text, voice, speed, output_path)
+                engine.generate_speech(text, voice, speed, output_path)?;
+                // Forward any checkpoint events from Python stderr
+                if let Some(tx) = checkpoint_tx {
+                    for cp in engine.drain_checkpoints() {
+                        let _ = tx.send(cp);
+                    }
+                }
+                Ok(())
             }
             None => Err("Engine not initialized".into()),
         }

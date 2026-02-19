@@ -3,7 +3,7 @@ use crate::commands::models::VoiceInfo;
 use crate::services::onnx_engine::{EngineState, OnnxEngine};
 use crate::services::path_service;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Maximum time allowed for a single TTS generation before timeout.
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
@@ -59,6 +59,9 @@ pub async fn generate_speech(
         &text[..std::cmp::min(text.len(), 50)]
     );
 
+    // Create checkpoint channel for debug logging
+    let (checkpoint_tx, checkpoint_rx) = std::sync::mpsc::channel::<serde_json::Value>();
+
     // Single lock acquisition: check/switch model + run inference atomically
     let engine_state = app.state::<EngineState>().inner().clone();
     let output_clone = output_path.clone();
@@ -79,7 +82,11 @@ pub async fn generate_speech(
             engine.initialize(&model_id, &model_dir)?;
         }
 
-        engine.generate_speech(&text, &voice, speed, std::path::Path::new(&output_clone))
+        engine.generate_speech_with_checkpoints(
+            &text, &voice, speed,
+            std::path::Path::new(&output_clone),
+            Some(&checkpoint_tx),
+        )
     });
 
     match tokio::time::timeout(GENERATION_TIMEOUT, task).await {
@@ -92,6 +99,11 @@ pub async fn generate_speech(
                 GENERATION_TIMEOUT.as_secs()
             ));
         }
+    }
+
+    // Drain and emit checkpoint events to the frontend
+    while let Ok(checkpoint) = checkpoint_rx.try_recv() {
+        let _ = app.emit("tts-checkpoint", &checkpoint);
     }
 
     log::info!("Speech generated: {}", output_path);
