@@ -337,6 +337,10 @@ impl Qwen3TTSEngine {
                 "stage": "embedding",
                 "timestamp": chrono_millis(),
                 "data": {
+                    "mode": "custom_voice",
+                    "text": &text[..std::cmp::min(text.len(), 200)],
+                    "text_len": text.len(),
+                    "voice": voice_id,
                     "seq_len": seq_len,
                     "trailing_tokens": trailing_len,
                     "first_8_values": first_8,
@@ -374,6 +378,7 @@ impl Qwen3TTSEngine {
                 "stage": "prefill",
                 "timestamp": chrono_millis(),
                 "data": {
+                    "mode": "custom_voice",
                     "kv_seq_len": kv_seq_len,
                     "argmax": argmax,
                     "top5_logits": top5,
@@ -408,9 +413,10 @@ impl Qwen3TTSEngine {
                 "stage": "decode_summary",
                 "timestamp": chrono_millis(),
                 "data": {
+                    "mode": "custom_voice",
                     "total_frames": frames.len(),
                     "max_steps": max_steps,
-                    "elapsed_ms": elapsed_ms,
+                    "generation_ms": elapsed_ms,
                     "first_5_frames": sample_frames,
                 }
             }));
@@ -427,14 +433,23 @@ impl Qwen3TTSEngine {
             elapsed_ms
         );
         if let Some(tx) = checkpoint_tx {
+            let rms = {
+                let sum_sq: f64 = audio.iter().map(|&s| (s as f64) * (s as f64)).sum();
+                (sum_sq / audio.len().max(1) as f64).sqrt()
+            };
+            let peak = audio.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
             let _ = tx.send(serde_json::json!({
                 "engine": "onnx",
                 "stage": "audio_decode",
                 "timestamp": chrono_millis(),
                 "data": {
+                    "mode": "custom_voice",
                     "num_frames": frames.len(),
                     "num_samples": audio.len(),
                     "duration_sec": duration_sec,
+                    "sample_rate": SAMPLE_RATE,
+                    "rms": rms,
+                    "peak": peak,
                     "elapsed_ms": elapsed_ms,
                 }
             }));
@@ -454,13 +469,24 @@ impl Qwen3TTSEngine {
             total_ms
         );
         if let Some(tx) = checkpoint_tx {
+            // Compute audio RMS and peak for comparison with safetensors
+            let rms = {
+                let sum_sq: f64 = audio.iter().map(|&s| (s as f64) * (s as f64)).sum();
+                (sum_sq / audio.len().max(1) as f64).sqrt()
+            };
+            let peak = audio.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
             let _ = tx.send(serde_json::json!({
                 "engine": "onnx",
                 "stage": "complete",
                 "timestamp": chrono_millis(),
                 "data": {
-                    "total_duration_ms": total_ms,
-                    "audio_duration_sec": duration_sec,
+                    "mode": "custom_voice",
+                    "num_samples": audio.len(),
+                    "duration_sec": duration_sec,
+                    "sample_rate": SAMPLE_RATE,
+                    "rms": rms,
+                    "peak": peak,
+                    "total_ms": total_ms,
                 }
             }));
         }

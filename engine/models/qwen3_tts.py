@@ -155,9 +155,12 @@ class Qwen3TTSModel:
         model_path = self._resolve_model_path(self._model_dir, "qwen3-tts", HF_REPO_CUSTOM_VOICE)
         kwargs = self._load_kwargs()
 
+        from device_manager import get_device
         emit_checkpoint("model_load", {
+            "model": "CustomVoice",
             "model_path": str(model_path),
-            "device": kwargs.get("device_map", "cpu"),
+            "device": get_device(),
+            "torch_dtype": str(kwargs.get("torch_dtype", "float32")),
         })
         logger.info("Loading CustomVoice model from: %s", model_path)
         self._model = QwenModel.from_pretrained(model_path, **kwargs)
@@ -290,6 +293,18 @@ class Qwen3TTSModel:
 
     def _generate_voice_design(self, text, speed, output_path, voice_description):
         """Generate speech using the VoiceDesign model (voice from NL description)."""
+        import time as _time
+
+        total_start = _time.monotonic()
+
+        emit_checkpoint("embedding", {
+            "mode": "voice_design",
+            "text": text[:200],
+            "text_len": len(text),
+            "description": (voice_description[:200] if voice_description else None),
+            "speed": speed,
+        })
+
         self._ensure_voice_design_model()
 
         logger.info(
@@ -315,16 +330,35 @@ class Qwen3TTSModel:
             gen_kwargs["instruct"] = instruct
             logger.info("VoiceDesign instruction: '%s'", instruct[:100])
 
+        emit_checkpoint("prefill", {
+            "mode": "voice_design",
+            "instruct": instruct[:200] if instruct else None,
+            "gen_kwargs": list(gen_kwargs.keys()),
+        })
+
         logger.info("Calling generate_voice_design(language=None, non_streaming=True)")
 
+        gen_start = _time.monotonic()
         wavs, sample_rate = self._voice_design_model.generate_voice_design(
             text=text,
             language=None,
             non_streaming_mode=True,
             **gen_kwargs,
         )
+        gen_elapsed_ms = int((_time.monotonic() - gen_start) * 1000)
 
         logger.info("VoiceDesign complete: %d samples, %d Hz", len(wavs[0]), sample_rate)
+
+        audio_arr = wavs[0] if isinstance(wavs[0], np.ndarray) else np.array(wavs[0])
+        rms = float(np.sqrt(np.mean(audio_arr.astype(np.float64) ** 2)))
+        peak = float(np.max(np.abs(audio_arr)))
+
+        emit_checkpoint("decode_summary", {
+            "mode": "voice_design",
+            "num_samples": len(wavs[0]),
+            "sample_rate": sample_rate,
+            "generation_ms": gen_elapsed_ms,
+        })
 
         if abs(speed - 1.0) >= 0.05:
             original_len = len(wavs[0])
@@ -332,10 +366,27 @@ class Qwen3TTSModel:
             logger.info("Speed %.2fx applied: %d -> %d samples", speed, original_len, len(wavs[0]))
 
         _write_wav(wavs, sample_rate, output_path)
+
+        total_ms = int((_time.monotonic() - total_start) * 1000)
+        emit_checkpoint("complete", {
+            "mode": "voice_design",
+            "num_samples": len(wavs[0]),
+            "duration_sec": len(wavs[0]) / sample_rate,
+            "sample_rate": sample_rate,
+            "rms": rms,
+            "peak": peak,
+            "total_ms": total_ms,
+            "generation_ms": gen_elapsed_ms,
+        })
+
         return output_path
 
     def _generate_custom_voice(self, text, voice, speed, output_path, voice_prompt):
         """Generate speech using the CustomVoice model (predefined speaker + instructions)."""
+        import time as _time
+
+        total_start = _time.monotonic()
+
         self._ensure_custom_voice_model()
 
         logger.info(
@@ -389,11 +440,23 @@ class Qwen3TTSModel:
             gen_kwargs["instruct"] = instruct
             logger.info("Voice instruction: '%s'", instruct[:80])
 
-        emit_checkpoint("tokenization", {
+        # Checkpoint: embedding stage (matches ONNX "embedding")
+        emit_checkpoint("embedding", {
+            "mode": "custom_voice",
             "text": text[:200],
+            "text_len": len(text),
             "voice": str(speaker),
             "language": language,
-            "instruct": instruct[:100] if instruct else None,
+            "speed": speed,
+        })
+
+        # Checkpoint: prefill stage (matches ONNX "prefill")
+        emit_checkpoint("prefill", {
+            "mode": "custom_voice",
+            "speaker": str(speaker),
+            "language": language,
+            "instruct": instruct[:200] if instruct else None,
+            "gen_kwargs": list(gen_kwargs.keys()),
         })
 
         logger.info(
@@ -403,6 +466,7 @@ class Qwen3TTSModel:
             ", ".join(f"{k}=..." for k in gen_kwargs) if gen_kwargs else "no extra kwargs",
         )
 
+        gen_start = _time.monotonic()
         wavs, sample_rate = self._model.generate_custom_voice(
             text=text,
             speaker=speaker,
@@ -410,17 +474,31 @@ class Qwen3TTSModel:
             non_streaming_mode=True,
             **gen_kwargs,
         )
+        gen_elapsed_ms = int((_time.monotonic() - gen_start) * 1000)
 
         logger.info("Generation complete: %d samples, %d Hz", len(wavs[0]), sample_rate)
 
-        # Compute audio stats for checkpoint
+        # Compute audio stats
         audio_arr = wavs[0] if isinstance(wavs[0], np.ndarray) else np.array(wavs[0])
         rms = float(np.sqrt(np.mean(audio_arr.astype(np.float64) ** 2)))
-        emit_checkpoint("complete", {
+        peak = float(np.max(np.abs(audio_arr)))
+
+        # Checkpoint: decode_summary (matches ONNX "decode_summary")
+        emit_checkpoint("decode_summary", {
+            "mode": "custom_voice",
+            "num_samples": len(wavs[0]),
+            "sample_rate": sample_rate,
+            "generation_ms": gen_elapsed_ms,
+        })
+
+        # Checkpoint: audio_decode (matches ONNX "audio_decode")
+        emit_checkpoint("audio_decode", {
+            "mode": "custom_voice",
             "num_samples": len(wavs[0]),
             "duration_sec": len(wavs[0]) / sample_rate,
             "sample_rate": sample_rate,
             "rms": rms,
+            "peak": peak,
         })
 
         # Apply speed via resampling (in addition to instruct hint)
@@ -432,6 +510,21 @@ class Qwen3TTSModel:
             )
 
         _write_wav(wavs, sample_rate, output_path)
+
+        total_ms = int((_time.monotonic() - total_start) * 1000)
+
+        # Checkpoint: complete (matches ONNX "complete")
+        emit_checkpoint("complete", {
+            "mode": "custom_voice",
+            "num_samples": len(wavs[0]),
+            "duration_sec": len(wavs[0]) / sample_rate,
+            "sample_rate": sample_rate,
+            "rms": rms,
+            "peak": peak,
+            "total_ms": total_ms,
+            "generation_ms": gen_elapsed_ms,
+        })
+
         return output_path
 
     def clone_from_audio(self, reference_audio, text, output_path):
@@ -440,7 +533,10 @@ class Qwen3TTSModel:
         Reference audio is trimmed to MAX_REF_SECONDS (default 15s) to prevent
         OOM — the model only needs 3-20s of clean speech for good cloning.
         """
+        import time as _time
+
         MAX_REF_SECONDS = 15
+        total_start = _time.monotonic()
 
         logger.info(
             "=== Voice Clone ===\n"
@@ -457,13 +553,33 @@ class Qwen3TTSModel:
         # Qwen3-TTS only needs 3-20s; longer audio wastes memory and can hang.
         trimmed_path = self._trim_reference_audio(reference_audio, MAX_REF_SECONDS)
 
+        # Log ref audio info for checkpoint
+        ref_info = sf.info(trimmed_path)
+        emit_checkpoint("embedding", {
+            "mode": "voice_clone",
+            "text": text[:200],
+            "text_len": len(text),
+            "ref_audio": os.path.basename(reference_audio),
+            "ref_duration_sec": ref_info.duration,
+            "ref_sample_rate": ref_info.samplerate,
+            "trimmed": trimmed_path != reference_audio,
+        })
+
         # Voice cloning requires the Base model variant
         self._ensure_base_model()
+
+        emit_checkpoint("prefill", {
+            "mode": "voice_clone",
+            "model": "Base",
+            "ref_audio_duration": ref_info.duration,
+            "x_vector_only": True,
+        })
 
         logger.info(
             "Calling generate_voice_clone(language=None, x_vector_only=True, non_streaming=True)"
         )
 
+        gen_start = _time.monotonic()
         wavs, sample_rate = self._base_model.generate_voice_clone(
             text=text,
             language=None,
@@ -471,6 +587,7 @@ class Qwen3TTSModel:
             x_vector_only_mode=True,
             non_streaming_mode=True,
         )
+        gen_elapsed_ms = int((_time.monotonic() - gen_start) * 1000)
 
         logger.info("Clone complete: %d samples, %d Hz", len(wavs[0]), sample_rate)
 
@@ -481,7 +598,32 @@ class Qwen3TTSModel:
             except OSError:
                 pass
 
+        # Compute audio stats
+        audio_arr = wavs[0] if isinstance(wavs[0], np.ndarray) else np.array(wavs[0])
+        rms = float(np.sqrt(np.mean(audio_arr.astype(np.float64) ** 2)))
+        peak = float(np.max(np.abs(audio_arr)))
+
+        emit_checkpoint("decode_summary", {
+            "mode": "voice_clone",
+            "num_samples": len(wavs[0]),
+            "sample_rate": sample_rate,
+            "generation_ms": gen_elapsed_ms,
+        })
+
         _write_wav(wavs, sample_rate, output_path)
+
+        total_ms = int((_time.monotonic() - total_start) * 1000)
+        emit_checkpoint("complete", {
+            "mode": "voice_clone",
+            "num_samples": len(wavs[0]),
+            "duration_sec": len(wavs[0]) / sample_rate,
+            "sample_rate": sample_rate,
+            "rms": rms,
+            "peak": peak,
+            "total_ms": total_ms,
+            "generation_ms": gen_elapsed_ms,
+        })
+
         return output_path
 
     @staticmethod
