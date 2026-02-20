@@ -77,7 +77,10 @@ onMounted(() => {
           {{ settings.isEighties ? '[GET]' : 'Download' }}
         </button>
       </div>
-      <div v-if="filteredModels.length === 0" class="no-models">
+      <div v-if="modelsStore.loading" class="no-models">
+        {{ settings.isEighties ? 'LOADING MODELS...' : 'Loading models...' }}
+      </div>
+      <div v-else-if="filteredModels.length === 0" class="no-models">
         <template v-if="modelsStore.loadError">
           <span class="load-error">{{ modelsStore.loadError }}</span>
         </template>
