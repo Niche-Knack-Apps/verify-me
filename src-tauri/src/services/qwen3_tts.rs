@@ -4,7 +4,7 @@ use ort::session::Session;
 use ort::value::{DynValue, Tensor};
 use rand::Rng;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const SAMPLE_RATE: u32 = 24000;
 /// Absolute ceiling — the model should always hit EOS before this.
@@ -15,6 +15,8 @@ const CODEC_FPS: f64 = 12.0;
 const SAFETY_MULTIPLIER: f64 = 3.0;
 /// Minimum cap so very short texts still get enough room.
 const MIN_MAX_STEPS: usize = 48; // ~4s of audio
+/// Maximum reference audio duration in seconds for voice cloning.
+const MAX_REF_SECONDS: f32 = 15.0;
 
 /// Estimate a reasonable max decode steps based on text length.
 ///
@@ -26,6 +28,22 @@ fn compute_max_steps(text: &str) -> usize {
     let estimated_seconds = word_count as f64 / 2.5;
     let estimated_frames = (estimated_seconds * CODEC_FPS * SAFETY_MULTIPLIER) as usize;
     estimated_frames.clamp(MIN_MAX_STEPS, MAX_STEPS_ABSOLUTE)
+}
+
+/// Build a natural-language pace instruction based on speed value.
+/// Matches the Python adapter's _speed_instruct().
+fn speed_instruct(speed: f32) -> &'static str {
+    if speed <= 0.7 {
+        "Speak very slowly and deliberately. "
+    } else if speed <= 0.9 {
+        "Speak at a slow, relaxed pace. "
+    } else if speed < 1.1 {
+        ""
+    } else if speed <= 1.3 {
+        "Speak at a quick pace. "
+    } else {
+        "Speak very fast. "
+    }
 }
 
 /// Sampling parameters parsed from generation_config.json.
@@ -180,13 +198,48 @@ impl Qwen3TTSConfig {
     }
 }
 
+/// Which model variant is currently loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Qwen3Variant {
+    CustomVoice,
+    VoiceDesign,
+    Base,
+}
+
+impl Qwen3Variant {
+    fn dirname(self) -> &'static str {
+        match self {
+            Self::CustomVoice => "qwen3-tts",
+            Self::VoiceDesign => "qwen3-tts-voice-design",
+            Self::Base => "qwen3-tts-base",
+        }
+    }
+}
+
+impl std::fmt::Display for Qwen3Variant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CustomVoice => write!(f, "CustomVoice"),
+            Self::VoiceDesign => write!(f, "VoiceDesign"),
+            Self::Base => write!(f, "Base"),
+        }
+    }
+}
+
 /// ONNX inference engine for Qwen3-TTS (0.6B / 1.7B variants).
+///
+/// Supports three model variants (CustomVoice, VoiceDesign, Base) that share
+/// the same ONNX architecture but have different trained weights. Only one
+/// variant is loaded at a time; switching reloads all ONNX sessions.
 ///
 /// Pipeline:
 ///   build_prompt_embeddings → talker_prefill (with KV cache) →
 ///   talker_decode (autoregressive) + code_predictor →
 ///   tokenizer12hz_decode → audio output
 pub struct Qwen3TTSEngine {
+    variant: Qwen3Variant,
+    /// Parent directory containing variant subdirs (e.g. models/onnx/)
+    models_parent_dir: PathBuf,
     config: Qwen3TTSConfig,
     gen_config: GenerationConfig,
     text_project: Session,
@@ -205,7 +258,36 @@ pub struct Qwen3TTSEngine {
 impl Qwen3TTSEngine {
     /// Load all ONNX sessions and the BPE tokenizer from `model_dir`.
     pub fn initialize(model_dir: &Path) -> Result<Self, String> {
-        log::info!("Loading Qwen3 TTS from: {}", model_dir.display());
+        let models_parent_dir = model_dir
+            .parent()
+            .ok_or_else(|| format!("Cannot determine parent of {}", model_dir.display()))?
+            .to_path_buf();
+
+        // Determine which variant this is based on directory name
+        let dir_name = model_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let variant = match dir_name {
+            "qwen3-tts-voice-design" => Qwen3Variant::VoiceDesign,
+            "qwen3-tts-base" => Qwen3Variant::Base,
+            _ => Qwen3Variant::CustomVoice,
+        };
+
+        Self::initialize_variant(model_dir, &models_parent_dir, variant)
+    }
+
+    /// Load all ONNX sessions for a specific variant from a directory.
+    fn initialize_variant(
+        model_dir: &Path,
+        models_parent_dir: &Path,
+        variant: Qwen3Variant,
+    ) -> Result<Self, String> {
+        log::info!(
+            "Loading Qwen3 TTS ({}) from: {}",
+            variant,
+            model_dir.display()
+        );
 
         let config = Qwen3TTSConfig::load(model_dir)?;
         let gen_config = GenerationConfig::load(model_dir);
@@ -228,7 +310,8 @@ impl Qwen3TTSEngine {
 
         let tokenizer = HfTokenizer::load(model_dir)?;
 
-        let mut text_project = load_session(&model_dir.join("text_project.onnx"), "text_project")?;
+        let mut text_project =
+            load_session(&model_dir.join("text_project.onnx"), "text_project")?;
         let codec_embed = load_session(&model_dir.join("codec_embed.onnx"), "codec_embed")?;
         let code_predictor_prefill = load_session(
             &model_dir.join("code_predictor_prefill.onnx"),
@@ -247,8 +330,10 @@ impl Qwen3TTSEngine {
         let tok_decode_path = model_dir.join("tokenizer12hz_decode.onnx");
         let tok_decode_path = if tok_decode_path.exists() {
             tok_decode_path
-        } else if let Some(parent) = model_dir.parent() {
-            let shared = parent.join("qwen3-tts").join("tokenizer12hz_decode.onnx");
+        } else {
+            let shared = models_parent_dir
+                .join("qwen3-tts")
+                .join("tokenizer12hz_decode.onnx");
             if shared.exists() {
                 log::info!("Using shared tokenizer12hz_decode from qwen3-tts");
                 shared
@@ -258,11 +343,8 @@ impl Qwen3TTSEngine {
                     model_dir.display()
                 ));
             }
-        } else {
-            return Err("tokenizer12hz_decode.onnx not found".into());
         };
-        let tokenizer12hz_decode =
-            load_session(&tok_decode_path, "tokenizer12hz_decode")?;
+        let tokenizer12hz_decode = load_session(&tok_decode_path, "tokenizer12hz_decode")?;
 
         // Speaker encoder is optional (only Base variant)
         let speaker_encoder_path = model_dir.join("speaker_encoder.onnx");
@@ -275,14 +357,13 @@ impl Qwen3TTSEngine {
 
         // Pre-compute tts_pad text embedding for use in decode loop
         let tts_pad_embed = run_embed_single(&mut text_project, "input_ids", config.tts_pad)?;
-        log::info!(
-            "Cached tts_pad_embed: {} floats",
-            tts_pad_embed.len()
-        );
+        log::info!("Cached tts_pad_embed: {} floats", tts_pad_embed.len());
 
-        log::info!("Qwen3 TTS initialized successfully");
+        log::info!("Qwen3 TTS ({}) initialized successfully", variant);
 
         Ok(Self {
+            variant,
+            models_parent_dir: models_parent_dir.to_path_buf(),
             config,
             gen_config,
             text_project,
@@ -298,6 +379,37 @@ impl Qwen3TTSEngine {
         })
     }
 
+    /// Switch to a different model variant if not already loaded.
+    /// Reloads all ONNX sessions from the sibling variant directory.
+    fn ensure_variant(&mut self, target: Qwen3Variant) -> Result<(), String> {
+        if self.variant == target {
+            return Ok(());
+        }
+
+        log::info!(
+            "Switching variant: {} -> {}",
+            self.variant,
+            target
+        );
+
+        let variant_dir = self.models_parent_dir.join(target.dirname());
+        if !variant_dir.exists() {
+            return Err(format!(
+                "Variant directory not found: {}. Run the ONNX conversion for {} first.",
+                variant_dir.display(),
+                target
+            ));
+        }
+
+        let new_engine =
+            Self::initialize_variant(&variant_dir, &self.models_parent_dir, target)?;
+
+        // Replace self with the new engine
+        *self = new_engine;
+
+        Ok(())
+    }
+
     /// Generate speech from text using a preset voice.
     pub fn generate_speech(
         &mut self,
@@ -306,7 +418,9 @@ impl Qwen3TTSEngine {
         speed: f32,
         output_path: &Path,
     ) -> Result<(), String> {
-        self.generate_speech_with_checkpoints(text, voice_id, speed, output_path, None)
+        self.generate_speech_with_checkpoints(
+            text, voice_id, speed, output_path, None, None, None, None,
+        )
     }
 
     /// Generate speech with optional checkpoint emission for debugging.
@@ -317,18 +431,52 @@ impl Qwen3TTSEngine {
         speed: f32,
         output_path: &Path,
         checkpoint_tx: Option<&std::sync::mpsc::Sender<serde_json::Value>>,
+        voice_prompt: Option<&str>,
+        voice_mode: Option<&str>,
+        voice_description: Option<&str>,
     ) -> Result<(), String> {
+        // Route to voice design mode if requested
+        if voice_mode == Some("design") {
+            return self.generate_voice_design(
+                text,
+                speed,
+                output_path,
+                checkpoint_tx,
+                voice_description,
+            );
+        }
+
+        // CustomVoice mode (default)
+        self.ensure_variant(Qwen3Variant::CustomVoice)?;
+
         let total_start = std::time::Instant::now();
+
+        // Build instruct from speed hint + user voice prompt
+        let speed_hint = speed_instruct(speed);
+        let user_prompt = voice_prompt
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .unwrap_or("");
+        let instruct = format!("{}{}", speed_hint, user_prompt);
+        let instruct = instruct.trim();
+        let instruct_opt = if instruct.is_empty() {
+            None
+        } else {
+            Some(instruct)
+        };
+
         log::info!(
-            "Qwen3 generating: voice={}, speed={}, text=\"{}\"",
+            "Qwen3 generating: voice={}, speed={}, instruct={:?}, text=\"{}\"",
             voice_id,
             speed,
+            instruct_opt.map(|s| &s[..std::cmp::min(s.len(), 60)]),
             &text[..std::cmp::min(text.len(), 80)]
         );
 
         // 1. Build prompt embeddings
         let t = std::time::Instant::now();
-        let (embeddings, seq_len, trailing_text_hidden, text_token_ids) = self.build_prompt_embeddings(text, voice_id)?;
+        let (embeddings, seq_len, trailing_text_hidden, text_token_ids) =
+            self.build_prompt_embeddings(text, voice_id, instruct_opt)?;
         let trailing_len = trailing_text_hidden.len() / self.config.hidden_size;
         let elapsed_ms = t.elapsed().as_millis();
         log::info!(
@@ -348,6 +496,7 @@ impl Qwen3TTSEngine {
                     "text": &text[..std::cmp::min(text.len(), 200)],
                     "text_len": text.len(),
                     "voice": voice_id,
+                    "instruct": instruct_opt,
                     "seq_len": seq_len,
                     "trailing_tokens": trailing_len,
                     "text_token_ids": text_token_ids,
@@ -357,10 +506,211 @@ impl Qwen3TTSEngine {
             }));
         }
 
+        // 2-6. Run the shared inference pipeline
+        self.run_inference_pipeline(
+            text,
+            &embeddings,
+            seq_len,
+            &trailing_text_hidden,
+            speed,
+            output_path,
+            checkpoint_tx,
+            "custom_voice",
+            total_start,
+        )
+    }
+
+    /// Generate speech using the VoiceDesign model (voice from NL description).
+    fn generate_voice_design(
+        &mut self,
+        text: &str,
+        speed: f32,
+        output_path: &Path,
+        checkpoint_tx: Option<&std::sync::mpsc::Sender<serde_json::Value>>,
+        voice_description: Option<&str>,
+    ) -> Result<(), String> {
+        self.ensure_variant(Qwen3Variant::VoiceDesign)?;
+
+        let total_start = std::time::Instant::now();
+
+        // Build instruct from speed hint + voice description
+        let speed_hint = speed_instruct(speed);
+        let desc = voice_description
+            .map(|d| d.trim())
+            .filter(|d| !d.is_empty())
+            .unwrap_or("");
+        let instruct = format!("{}{}", speed_hint, desc);
+        let instruct = instruct.trim();
+
+        if instruct.is_empty() {
+            return Err(
+                "Voice design requires a voice description (e.g. 'A young woman with a gentle British accent')"
+                    .into(),
+            );
+        }
+
+        log::info!(
+            "Qwen3 VoiceDesign: speed={}, instruct=\"{}\", text=\"{}\"",
+            speed,
+            &instruct[..std::cmp::min(instruct.len(), 80)],
+            &text[..std::cmp::min(text.len(), 80)]
+        );
+
+        // 1. Build voice design prompt embeddings (no speaker token)
+        let t = std::time::Instant::now();
+        let (embeddings, seq_len, trailing_text_hidden, text_token_ids) =
+            self.build_voice_design_embeddings(text, instruct)?;
+        let trailing_len = trailing_text_hidden.len() / self.config.hidden_size;
+        let elapsed_ms = t.elapsed().as_millis();
+        log::info!(
+            "[1/5] VoiceDesign embeddings: seq_len={}, trailing={} tokens ({} ms)",
+            seq_len,
+            trailing_len,
+            elapsed_ms
+        );
+        if let Some(tx) = checkpoint_tx {
+            let first_8: Vec<f32> = embeddings.iter().take(8).copied().collect();
+            let _ = tx.send(serde_json::json!({
+                "engine": "onnx",
+                "stage": "embedding",
+                "timestamp": chrono_millis(),
+                "data": {
+                    "mode": "voice_design",
+                    "text": &text[..std::cmp::min(text.len(), 200)],
+                    "text_len": text.len(),
+                    "description": &instruct[..std::cmp::min(instruct.len(), 200)],
+                    "seq_len": seq_len,
+                    "trailing_tokens": trailing_len,
+                    "text_token_ids": text_token_ids,
+                    "first_8_values": first_8,
+                    "elapsed_ms": elapsed_ms,
+                }
+            }));
+        }
+
+        // 2-6. Shared inference pipeline
+        self.run_inference_pipeline(
+            text,
+            &embeddings,
+            seq_len,
+            &trailing_text_hidden,
+            speed,
+            output_path,
+            checkpoint_tx,
+            "voice_design",
+            total_start,
+        )
+    }
+
+    /// Generate speech using reference audio for voice cloning (Base variant).
+    pub fn clone_voice(
+        &mut self,
+        text: &str,
+        reference_audio: &Path,
+        speed: f32,
+        output_path: &Path,
+    ) -> Result<(), String> {
+        self.ensure_variant(Qwen3Variant::Base)?;
+
+        if self.speaker_encoder.is_none() {
+            return Err(
+                "Voice cloning requires the Base model variant with speaker_encoder.onnx".into(),
+            );
+        }
+
+        let total_start = std::time::Instant::now();
+        log::info!(
+            "Qwen3 voice clone: ref={}, speed={}, text=\"{}\"",
+            reference_audio.display(),
+            speed,
+            &text[..std::cmp::min(text.len(), 80)]
+        );
+
+        // 1. Load and process reference audio
+        let t = std::time::Instant::now();
+        let (samples, ref_sr) = load_wav(reference_audio)?;
+        let samples = resample_to_24k(&samples, ref_sr);
+        let max_samples = (MAX_REF_SECONDS * SAMPLE_RATE as f32) as usize;
+        let samples = if samples.len() > max_samples {
+            log::info!(
+                "Trimming ref audio: {} -> {} samples ({:.1}s)",
+                samples.len(),
+                max_samples,
+                MAX_REF_SECONDS
+            );
+            samples[..max_samples].to_vec()
+        } else {
+            samples
+        };
+        log::info!(
+            "Reference audio: {} samples ({:.1}s) at {}Hz ({} ms)",
+            samples.len(),
+            samples.len() as f32 / SAMPLE_RATE as f32,
+            SAMPLE_RATE,
+            t.elapsed().as_millis()
+        );
+
+        // 2. Extract mel spectrogram and run speaker encoder
+        let t = std::time::Instant::now();
+        let mel = extract_mel(&samples, SAMPLE_RATE);
+        let mel_frames = mel.len() / 128;
+        log::info!(
+            "Mel spectrogram: {} frames x 128 bins ({} ms)",
+            mel_frames,
+            t.elapsed().as_millis()
+        );
+
+        let t = std::time::Instant::now();
+        let speaker_embed = self.run_speaker_encoder(&mel, mel_frames)?;
+        log::info!(
+            "Speaker embedding: {} dims ({} ms)",
+            speaker_embed.len(),
+            t.elapsed().as_millis()
+        );
+
+        // 3. Build clone prompt embeddings with speaker embedding injected
+        let t = std::time::Instant::now();
+        let (embeddings, seq_len, trailing_text_hidden, _text_token_ids) =
+            self.build_clone_embeddings(text, &speaker_embed)?;
+        let trailing_len = trailing_text_hidden.len() / self.config.hidden_size;
+        log::info!(
+            "[1/5] Clone embeddings: seq_len={}, trailing={} tokens ({} ms)",
+            seq_len,
+            trailing_len,
+            t.elapsed().as_millis()
+        );
+
+        // 4-6. Shared inference pipeline
+        self.run_inference_pipeline(
+            text,
+            &embeddings,
+            seq_len,
+            &trailing_text_hidden,
+            speed,
+            output_path,
+            None,
+            "voice_clone",
+            total_start,
+        )
+    }
+
+    /// Shared inference pipeline: prefill → decode → audio decode → normalize → write WAV.
+    fn run_inference_pipeline(
+        &mut self,
+        text: &str,
+        embeddings: &[f32],
+        seq_len: usize,
+        trailing_text_hidden: &[f32],
+        speed: f32,
+        output_path: &Path,
+        checkpoint_tx: Option<&std::sync::mpsc::Sender<serde_json::Value>>,
+        mode: &str,
+        total_start: std::time::Instant,
+    ) -> Result<(), String> {
         // 2. Prefill
         let t = std::time::Instant::now();
         let (last_logits, last_hidden, kv_cache, kv_seq_len) =
-            self.run_prefill(&embeddings, seq_len)?;
+            self.run_prefill(embeddings, seq_len)?;
         let elapsed_ms = t.elapsed().as_millis();
         log::info!(
             "[2/5] Prefill done: kv_seq_len={} ({} ms)",
@@ -368,25 +718,29 @@ impl Qwen3TTSEngine {
             elapsed_ms
         );
         if let Some(tx) = checkpoint_tx {
-            // Find argmax and top-5 logits
             let argmax = last_logits
                 .iter()
                 .enumerate()
                 .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, _)| i)
                 .unwrap_or(0);
-            let mut indexed: Vec<(usize, f32)> = last_logits.iter().copied().enumerate().collect();
-            indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let top5: Vec<serde_json::Value> = indexed.iter().take(5).map(|(i, v)| {
-                serde_json::json!({"idx": i, "logit": v})
-            }).collect();
+            let mut indexed: Vec<(usize, f32)> =
+                last_logits.iter().copied().enumerate().collect();
+            indexed.sort_unstable_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let top5: Vec<serde_json::Value> = indexed
+                .iter()
+                .take(5)
+                .map(|(i, v)| serde_json::json!({"idx": i, "logit": v}))
+                .collect();
             let first_8_hidden: Vec<f32> = last_hidden.iter().take(8).copied().collect();
             let _ = tx.send(serde_json::json!({
                 "engine": "onnx",
                 "stage": "prefill",
                 "timestamp": chrono_millis(),
                 "data": {
-                    "mode": "custom_voice",
+                    "mode": mode,
                     "kv_seq_len": kv_seq_len,
                     "argmax": argmax,
                     "top5_logits": top5,
@@ -398,11 +752,19 @@ impl Qwen3TTSEngine {
 
         // 3. Autoregressive decode
         let max_steps = compute_max_steps(text);
-        log::info!("Max decode steps for {} words: {}", text.split_whitespace().count(), max_steps);
+        log::info!(
+            "Max decode steps for {} words: {}",
+            text.split_whitespace().count(),
+            max_steps
+        );
         let t = std::time::Instant::now();
         let frames = self.run_decode_loop(
-            last_logits, last_hidden, kv_cache, kv_seq_len, max_steps,
-            &trailing_text_hidden,
+            last_logits,
+            last_hidden,
+            kv_cache,
+            kv_seq_len,
+            max_steps,
+            trailing_text_hidden,
         )?;
         let elapsed_ms = t.elapsed().as_millis();
         log::info!(
@@ -410,18 +772,15 @@ impl Qwen3TTSEngine {
             frames.len(),
             elapsed_ms
         );
-        // Decode step checkpoints are emitted inside run_decode_loop
-        // Emit a summary checkpoint for the whole decode phase
         if let Some(tx) = checkpoint_tx {
-            // Log first 5 frames
-            let sample_frames: Vec<Vec<i64>> = frames.iter().take(5)
-                .map(|f| f.to_vec()).collect();
+            let sample_frames: Vec<Vec<i64>> =
+                frames.iter().take(5).map(|f| f.to_vec()).collect();
             let _ = tx.send(serde_json::json!({
                 "engine": "onnx",
                 "stage": "decode_summary",
                 "timestamp": chrono_millis(),
                 "data": {
-                    "mode": "custom_voice",
+                    "mode": mode,
                     "total_frames": frames.len(),
                     "max_steps": max_steps,
                     "generation_ms": elapsed_ms,
@@ -451,7 +810,7 @@ impl Qwen3TTSEngine {
                 "stage": "audio_decode",
                 "timestamp": chrono_millis(),
                 "data": {
-                    "mode": "custom_voice",
+                    "mode": mode,
                     "num_frames": frames.len(),
                     "num_samples": audio.len(),
                     "duration_sec": duration_sec,
@@ -470,7 +829,11 @@ impl Qwen3TTSEngine {
             for s in &mut audio {
                 *s *= gain;
             }
-            log::info!("[4.5] Peak-normalized: peak {:.4} → 0.95 (gain {:.2}x)", peak, gain);
+            log::info!(
+                "[4.5] Peak-normalized: peak {:.4} -> 0.95 (gain {:.2}x)",
+                peak,
+                gain
+            );
         }
 
         // 6. Speed adjustment + write WAV
@@ -487,7 +850,6 @@ impl Qwen3TTSEngine {
             total_ms
         );
         if let Some(tx) = checkpoint_tx {
-            // Compute audio RMS and peak for comparison with safetensors
             let rms = {
                 let sum_sq: f64 = audio.iter().map(|&s| (s as f64) * (s as f64)).sum();
                 (sum_sq / audio.len().max(1) as f64).sqrt()
@@ -498,7 +860,7 @@ impl Qwen3TTSEngine {
                 "stage": "complete",
                 "timestamp": chrono_millis(),
                 "data": {
-                    "mode": "custom_voice",
+                    "mode": mode,
                     "num_samples": audio.len(),
                     "duration_sec": duration_sec,
                     "sample_rate": SAMPLE_RATE,
@@ -510,21 +872,6 @@ impl Qwen3TTSEngine {
         }
 
         Ok(())
-    }
-
-    /// Generate speech using reference audio for voice cloning.
-    pub fn clone_voice(
-        &mut self,
-        _text: &str,
-        _reference_audio: &Path,
-        _output_path: &Path,
-    ) -> Result<(), String> {
-        if self.speaker_encoder.is_none() {
-            return Err(
-                "Voice cloning requires the Base model variant with speaker_encoder".into(),
-            );
-        }
-        Err("Voice cloning is not yet implemented for Qwen3-TTS".into())
     }
 
     /// Returns available voice presets from config.
@@ -566,53 +913,108 @@ impl Qwen3TTSEngine {
             }
         }
 
-        // 2. Detect language from text (simple heuristic)
-        let has_hangul = text.chars().any(|c| matches!(c, '\u{AC00}'..='\u{D7AF}' | '\u{1100}'..='\u{11FF}'));
-        let has_japanese = text.chars().any(|c| matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}'));
-        let has_cjk = text.chars().any(|c| matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}'));
+        self.detect_language_from_text(text, default_english)
+    }
+
+    /// Detect language from text using character range heuristics.
+    fn detect_language_from_text(&self, text: &str, default: i64) -> i64 {
+        let has_hangul = text.chars().any(|c| {
+            matches!(c, '\u{AC00}'..='\u{D7AF}' | '\u{1100}'..='\u{11FF}')
+        });
+        let has_japanese = text.chars().any(|c| {
+            matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}')
+        });
+        let has_cjk = text.chars().any(|c| {
+            matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}')
+        });
 
         if has_hangul {
-            *self.config.codec_language_id.get("korean").unwrap_or(&default_english)
+            *self
+                .config
+                .codec_language_id
+                .get("korean")
+                .unwrap_or(&default)
         } else if has_japanese {
-            *self.config.codec_language_id.get("japanese").unwrap_or(&default_english)
+            *self
+                .config
+                .codec_language_id
+                .get("japanese")
+                .unwrap_or(&default)
         } else if has_cjk {
-            *self.config.codec_language_id.get("chinese").unwrap_or(&default_english)
+            *self
+                .config
+                .codec_language_id
+                .get("chinese")
+                .unwrap_or(&default)
         } else {
-            *self.config.codec_language_id.get("english").unwrap_or(&default_english)
+            *self
+                .config
+                .codec_language_id
+                .get("english")
+                .unwrap_or(&default)
         }
     }
 
-    /// Build the full prompt embedding sequence for TTS generation.
+    /// Build instruct embeddings by tokenizing and projecting through text_project.
     ///
-    /// Layout (matching reference implementation):
+    /// Wraps instruct text in chat template: `<|im_start|>user\n{instruct}<|im_end|>\n`
+    /// Returns flat embeddings [N * hidden_size].
+    fn build_instruct_embeddings(&mut self, instruct: &str) -> Result<Vec<f32>, String> {
+        let formatted = format!(
+            "<|im_start|>user\n{}<|im_end|>\n",
+            instruct
+        );
+        let instruct_ids = self.tokenizer.tokenize_with_special_tokens(&formatted);
+        let n = instruct_ids.len();
+        if n == 0 {
+            return Err("Instruct text produced no tokens".into());
+        }
+        log::info!(
+            "Instruct tokens: {} -> {:?}{}",
+            n,
+            &instruct_ids[..std::cmp::min(n, 10)],
+            if n > 10 { "..." } else { "" }
+        );
+
+        run_embed_batch(&mut self.text_project, "input_ids", &instruct_ids)
+    }
+
+    /// Build the full prompt embedding sequence for CustomVoice TTS.
+    ///
+    /// Layout without instruct:
     ///   [role(3), mixed(6), first_text+codec_bos(1)] = 10 positions
     ///
-    /// Mixed positions (6):
-    ///   tts_pad + think, tts_pad + think_bos, tts_pad + language_id,
-    ///   tts_pad + think_eos, tts_pad + spk, tts_bos + codec_pad
+    /// Layout with instruct:
+    ///   [instruct(N), role(3), mixed(6), first_text+codec_bos(1)] = N + 10 positions
     ///
-    /// Returns (flat_embeddings, prefill_len=10, trailing_text_hidden, text_token_ids).
-    ///
-    /// `trailing_text_hidden` contains text_project embeddings for text_tokens[1:]
-    /// + tts_eos. These are drip-fed one per decode step to maintain text–audio
-    /// alignment (per the reference implementation).
-    ///
-    /// `text_token_ids` is returned for checkpoint logging.
+    /// Returns (flat_embeddings, prefill_len, trailing_text_hidden, text_token_ids).
     fn build_prompt_embeddings(
         &mut self,
         text: &str,
         voice_id: &str,
+        instruct: Option<&str>,
     ) -> Result<(Vec<f32>, usize, Vec<f32>, Vec<i64>), String> {
         let h = self.config.hidden_size;
-        let cfg = &self.config;
+
+        // Copy config values we need before calling &mut self methods
+        let im_start = self.config.im_start;
+        let assistant = self.config.assistant;
+        let tts_pad = self.config.tts_pad;
+        let tts_bos = self.config.tts_bos;
+        let tts_eos = self.config.tts_eos;
+        let codec_think_id = self.config.codec_think_id;
+        let codec_think_bos_id = self.config.codec_think_bos_id;
+        let codec_think_eos_id = self.config.codec_think_eos_id;
+        let codec_pad_id = self.config.codec_pad_id;
+        let codec_bos_id = self.config.codec_bos_id;
 
         // Look up speaker codec token ID
         let voice_lower = voice_id.to_lowercase();
-        let spk_token = *cfg.spk_id.get(&voice_lower).ok_or_else(|| {
+        let spk_token = *self.config.spk_id.get(&voice_lower).ok_or_else(|| {
             format!(
                 "Unknown voice '{}'. Available: {:?}",
                 voice_id,
-                cfg.spk_id.keys().collect::<Vec<_>>()
+                self.config.spk_id.keys().collect::<Vec<_>>()
             )
         })?;
 
@@ -634,93 +1036,394 @@ impl Qwen3TTSEngine {
             return Err("Cannot generate speech from empty text".into());
         }
 
-        // Prefill: [role(3), mixed(6), first_text(1)] = 10 positions
-        let prefill_len = 10;
+        // Build instruct embeddings if provided
+        let instruct_embeds = match instruct {
+            Some(inst) if !inst.is_empty() => Some(self.build_instruct_embeddings(inst)?),
+            _ => None,
+        };
+        let instruct_positions = instruct_embeds.as_ref().map_or(0, |e| e.len() / h);
 
-        // ── Build text token IDs for prefill ──
+        // Core prefill: [role(3), mixed(6), first_text(1)] = 10 positions
+        let core_len = 10;
+        let prefill_len = instruct_positions + core_len;
+
+        // ── Build text token IDs for core prefill ──
         let newline: i64 = 198;
-        let mut text_ids: Vec<i64> = Vec::with_capacity(prefill_len);
+        let mut text_ids: Vec<i64> = Vec::with_capacity(core_len);
         // Role prefix (3)
-        text_ids.push(cfg.im_start);
-        text_ids.push(cfg.assistant);
+        text_ids.push(im_start);
+        text_ids.push(assistant);
         text_ids.push(newline);
         // Mixed text side (6): tts_pad × 5 + tts_bos
         for _ in 0..5 {
-            text_ids.push(cfg.tts_pad);
+            text_ids.push(tts_pad);
         }
-        text_ids.push(cfg.tts_bos);
+        text_ids.push(tts_bos);
         // First text token (1)
         text_ids.push(text_tokens[0]);
 
-        assert_eq!(text_ids.len(), prefill_len);
+        assert_eq!(text_ids.len(), core_len);
 
-        // Run text_project on prefill tokens → [1, 10, hidden_size]
+        // Run text_project on core tokens → [1, 10, hidden_size]
         let text_embeds = run_embed_batch(&mut self.text_project, "input_ids", &text_ids)?;
-        assert_eq!(text_embeds.len(), prefill_len * h);
+        assert_eq!(text_embeds.len(), core_len * h);
 
         // ── Build codec token IDs (7 tokens) ──
         // [think, think_bos, language_id, think_eos, spk, pad, bos]
         let codec_ids = vec![
-            cfg.codec_think_id,
-            cfg.codec_think_bos_id,
+            codec_think_id,
+            codec_think_bos_id,
             language_id,
-            cfg.codec_think_eos_id,
+            codec_think_eos_id,
             spk_token,
-            cfg.codec_pad_id,
-            cfg.codec_bos_id,
+            codec_pad_id,
+            codec_bos_id,
         ];
         let codec_embeds = run_embed_batch(&mut self.codec_embed, "input_ids", &codec_ids)?;
         assert_eq!(codec_embeds.len(), 7 * h);
 
-        // ── Construct final embedding by element-wise addition ──
-        let mut final_embeds = vec![0.0f32; prefill_len * h];
+        // ── Construct final embedding ──
+        let mut final_embeds = Vec::with_capacity(prefill_len * h);
 
-        for pos in 0..prefill_len {
-            let dst = &mut final_embeds[pos * h..(pos + 1) * h];
+        // Prepend instruct embeddings (pure text, no codec addition)
+        if let Some(ref ie) = instruct_embeds {
+            final_embeds.extend_from_slice(ie);
+        }
+
+        // Core positions: role(3) + mixed(6) + first_text+bos(1)
+        for pos in 0..core_len {
             let text_src = &text_embeds[pos * h..(pos + 1) * h];
 
             if pos < 3 {
                 // Role positions: pure text embedding (no codec)
-                dst.copy_from_slice(text_src);
+                final_embeds.extend_from_slice(text_src);
             } else if pos < 9 {
                 // Mixed positions (3..8): text + codec[pos-3]
                 let codec_idx = pos - 3;
                 let codec_src = &codec_embeds[codec_idx * h..(codec_idx + 1) * h];
                 for j in 0..h {
-                    dst[j] = text_src[j] + codec_src[j];
+                    final_embeds.push(text_src[j] + codec_src[j]);
                 }
             } else {
                 // Position 9: first_text_token + codec_bos (codec index 6)
                 let codec_src = &codec_embeds[6 * h..7 * h];
                 for j in 0..h {
-                    dst[j] = text_src[j] + codec_src[j];
+                    final_embeds.push(text_src[j] + codec_src[j]);
                 }
             }
         }
 
+        assert_eq!(final_embeds.len(), prefill_len * h);
+
         // ── Build trailing text hidden: text_tokens[1:] + tts_eos ──
-        // These are drip-fed during decode (T embeddings total: T-1 remaining text + 1 eos)
         let mut trailing_ids: Vec<i64> = Vec::with_capacity(text_len);
         if text_len > 1 {
             trailing_ids.extend_from_slice(&text_tokens[1..]);
         }
-        trailing_ids.push(cfg.tts_eos);
+        trailing_ids.push(tts_eos);
 
-        let trailing_text_hidden = run_embed_batch(
-            &mut self.text_project,
-            "input_ids",
-            &trailing_ids,
-        )?;
+        let trailing_text_hidden =
+            run_embed_batch(&mut self.text_project, "input_ids", &trailing_ids)?;
 
-        Ok((final_embeds, prefill_len, trailing_text_hidden, text_tokens))
+        Ok((
+            final_embeds,
+            prefill_len,
+            trailing_text_hidden,
+            text_tokens,
+        ))
+    }
+
+    /// Build prompt embeddings for VoiceDesign mode (no speaker token).
+    ///
+    /// Layout: [instruct(N), role(3), mixed(5), first_text+bos(1)] = N + 9
+    ///
+    /// The codec sequence has NO speaker token:
+    ///   codec_0 = [think, think_bos, lang, think_eos] (4 tokens)
+    ///   codec_1 = [pad, bos] (2 tokens)
+    ///   total = 6 codec tokens for 5 mixed positions + 1 bos position
+    fn build_voice_design_embeddings(
+        &mut self,
+        text: &str,
+        instruct: &str,
+    ) -> Result<(Vec<f32>, usize, Vec<f32>, Vec<i64>), String> {
+        let h = self.config.hidden_size;
+
+        // Copy config values before calling &mut self methods
+        let im_start = self.config.im_start;
+        let assistant = self.config.assistant;
+        let tts_pad = self.config.tts_pad;
+        let tts_bos = self.config.tts_bos;
+        let tts_eos = self.config.tts_eos;
+        let codec_think_id = self.config.codec_think_id;
+        let codec_think_bos_id = self.config.codec_think_bos_id;
+        let codec_think_eos_id = self.config.codec_think_eos_id;
+        let codec_pad_id = self.config.codec_pad_id;
+        let codec_bos_id = self.config.codec_bos_id;
+
+        // Detect language from text
+        let default_english = 2050;
+        let language_id = self.detect_language_from_text(text, default_english);
+        log::info!("VoiceDesign language ID: {}", language_id);
+
+        // Tokenize the text
+        let text_tokens = self.tokenizer.tokenize(text);
+        let text_len = text_tokens.len();
+        if text_len == 0 {
+            return Err("Cannot generate speech from empty text".into());
+        }
+
+        // Build instruct embeddings (required for VoiceDesign)
+        let instruct_embeds = self.build_instruct_embeddings(instruct)?;
+        let instruct_positions = instruct_embeds.len() / h;
+
+        // Core: [role(3), mixed(5), first_text(1)] = 9
+        let core_len = 9;
+        let prefill_len = instruct_positions + core_len;
+
+        // Text token IDs for core
+        let newline: i64 = 198;
+        let mut text_ids: Vec<i64> = Vec::with_capacity(core_len);
+        // Role prefix (3)
+        text_ids.push(im_start);
+        text_ids.push(assistant);
+        text_ids.push(newline);
+        // Mixed text side (5): tts_pad × 4 + tts_bos (no speaker = one fewer pad)
+        for _ in 0..4 {
+            text_ids.push(tts_pad);
+        }
+        text_ids.push(tts_bos);
+        // First text token (1)
+        text_ids.push(text_tokens[0]);
+
+        assert_eq!(text_ids.len(), core_len);
+
+        let text_embeds = run_embed_batch(&mut self.text_project, "input_ids", &text_ids)?;
+
+        // Codec tokens (6, no speaker):
+        // [think, think_bos, lang, think_eos, pad, bos]
+        let codec_ids = vec![
+            codec_think_id,
+            codec_think_bos_id,
+            language_id,
+            codec_think_eos_id,
+            codec_pad_id,
+            codec_bos_id,
+        ];
+        let codec_embeds = run_embed_batch(&mut self.codec_embed, "input_ids", &codec_ids)?;
+        assert_eq!(codec_embeds.len(), 6 * h);
+
+        // Construct final embedding
+        let mut final_embeds = Vec::with_capacity(prefill_len * h);
+
+        // Prepend instruct embeddings
+        final_embeds.extend_from_slice(&instruct_embeds);
+
+        // Core positions: role(3) + mixed(5) + first_text+bos(1)
+        for pos in 0..core_len {
+            let text_src = &text_embeds[pos * h..(pos + 1) * h];
+
+            if pos < 3 {
+                // Role: pure text
+                final_embeds.extend_from_slice(text_src);
+            } else if pos < 8 {
+                // Mixed (5 positions): text + codec[pos-3]
+                let codec_idx = pos - 3;
+                let codec_src = &codec_embeds[codec_idx * h..(codec_idx + 1) * h];
+                for j in 0..h {
+                    final_embeds.push(text_src[j] + codec_src[j]);
+                }
+            } else {
+                // Position 8: first_text + codec_bos (codec index 5)
+                let codec_src = &codec_embeds[5 * h..6 * h];
+                for j in 0..h {
+                    final_embeds.push(text_src[j] + codec_src[j]);
+                }
+            }
+        }
+
+        assert_eq!(final_embeds.len(), prefill_len * h);
+
+        // Trailing text hidden
+        let mut trailing_ids: Vec<i64> = Vec::with_capacity(text_len);
+        if text_len > 1 {
+            trailing_ids.extend_from_slice(&text_tokens[1..]);
+        }
+        trailing_ids.push(tts_eos);
+
+        let trailing_text_hidden =
+            run_embed_batch(&mut self.text_project, "input_ids", &trailing_ids)?;
+
+        Ok((
+            final_embeds,
+            prefill_len,
+            trailing_text_hidden,
+            text_tokens,
+        ))
+    }
+
+    /// Build prompt embeddings for voice cloning (Base variant, x_vector_only mode).
+    ///
+    /// Layout: [role(3), mixed(6), first_text+bos(1)] = 10
+    ///
+    /// The codec sequence has a speaker embedding instead of a speaker token ID:
+    ///   codec_0 = [think, think_bos, lang, think_eos] (4 codec tokens, embedded normally)
+    ///   speaker_embed = [2048D speaker embedding] (1 position, injected directly)
+    ///   codec_1 = [pad, bos] (2 codec tokens, embedded normally)
+    fn build_clone_embeddings(
+        &mut self,
+        text: &str,
+        speaker_embed: &[f32],
+    ) -> Result<(Vec<f32>, usize, Vec<f32>, Vec<i64>), String> {
+        let h = self.config.hidden_size;
+
+        assert_eq!(speaker_embed.len(), h, "Speaker embed must be [hidden_size]");
+
+        // Copy config values before calling &mut self methods
+        let im_start = self.config.im_start;
+        let assistant = self.config.assistant;
+        let tts_pad = self.config.tts_pad;
+        let tts_bos = self.config.tts_bos;
+        let tts_eos = self.config.tts_eos;
+        let codec_think_id = self.config.codec_think_id;
+        let codec_think_bos_id = self.config.codec_think_bos_id;
+        let codec_think_eos_id = self.config.codec_think_eos_id;
+        let codec_pad_id = self.config.codec_pad_id;
+        let codec_bos_id = self.config.codec_bos_id;
+
+        // Detect language from text
+        let default_english = 2050;
+        let language_id = self.detect_language_from_text(text, default_english);
+        log::info!("Clone language ID: {}", language_id);
+
+        // Tokenize the text
+        let text_tokens = self.tokenizer.tokenize(text);
+        let text_len = text_tokens.len();
+        if text_len == 0 {
+            return Err("Cannot generate speech from empty text".into());
+        }
+
+        // Prefill: [role(3), mixed(6), first_text(1)] = 10 (same as CustomVoice)
+        let prefill_len = 10;
+
+        // Text token IDs
+        let newline: i64 = 198;
+        let mut text_ids: Vec<i64> = Vec::with_capacity(prefill_len);
+        // Role prefix (3)
+        text_ids.push(im_start);
+        text_ids.push(assistant);
+        text_ids.push(newline);
+        // Mixed text side (6): tts_pad × 5 + tts_bos
+        for _ in 0..5 {
+            text_ids.push(tts_pad);
+        }
+        text_ids.push(tts_bos);
+        // First text token (1)
+        text_ids.push(text_tokens[0]);
+
+        let text_embeds = run_embed_batch(&mut self.text_project, "input_ids", &text_ids)?;
+
+        // Codec tokens — 6 embeddable tokens (speaker position uses direct embedding)
+        let codec_ids = vec![
+            codec_think_id,
+            codec_think_bos_id,
+            language_id,
+            codec_think_eos_id,
+            codec_pad_id,
+            codec_bos_id,
+        ];
+        let codec_embeds = run_embed_batch(&mut self.codec_embed, "input_ids", &codec_ids)?;
+
+        // Construct final embedding
+        let mut final_embeds = Vec::with_capacity(prefill_len * h);
+
+        for pos in 0..prefill_len {
+            let text_src = &text_embeds[pos * h..(pos + 1) * h];
+
+            if pos < 3 {
+                // Role: pure text
+                final_embeds.extend_from_slice(text_src);
+            } else if pos == 7 {
+                // Position 7 (mixed index 4): speaker embedding instead of codec token
+                for j in 0..h {
+                    final_embeds.push(text_src[j] + speaker_embed[j]);
+                }
+            } else if pos < 9 {
+                // Mixed positions: text + codec
+                // Codec index mapping:
+                //   pos 3 -> codec[0] (think)
+                //   pos 4 -> codec[1] (think_bos)
+                //   pos 5 -> codec[2] (lang)
+                //   pos 6 -> codec[3] (think_eos)
+                //   pos 7 -> speaker_embed (handled above)
+                //   pos 8 -> codec[4] (pad)
+                let codec_idx = if pos < 7 { pos - 3 } else { pos - 4 }; // skip speaker position
+                let codec_src = &codec_embeds[codec_idx * h..(codec_idx + 1) * h];
+                for j in 0..h {
+                    final_embeds.push(text_src[j] + codec_src[j]);
+                }
+            } else {
+                // Position 9: first_text + codec_bos (codec index 5)
+                let codec_src = &codec_embeds[5 * h..6 * h];
+                for j in 0..h {
+                    final_embeds.push(text_src[j] + codec_src[j]);
+                }
+            }
+        }
+
+        assert_eq!(final_embeds.len(), prefill_len * h);
+
+        // Trailing text hidden
+        let mut trailing_ids: Vec<i64> = Vec::with_capacity(text_len);
+        if text_len > 1 {
+            trailing_ids.extend_from_slice(&text_tokens[1..]);
+        }
+        trailing_ids.push(tts_eos);
+
+        let trailing_text_hidden =
+            run_embed_batch(&mut self.text_project, "input_ids", &trailing_ids)?;
+
+        Ok((
+            final_embeds,
+            prefill_len,
+            trailing_text_hidden,
+            text_tokens,
+        ))
+    }
+
+    // ── Speaker Encoder ──────────────────────────────────────────
+
+    /// Run the speaker encoder ONNX model on mel spectrogram input.
+    /// Input: mel [T, 128] flattened, Output: speaker embedding [2048].
+    fn run_speaker_encoder(
+        &mut self,
+        mel: &[f32],
+        mel_frames: usize,
+    ) -> Result<Vec<f32>, String> {
+        let encoder = self
+            .speaker_encoder
+            .as_mut()
+            .ok_or("Speaker encoder not loaded")?;
+
+        let mel_tensor = Tensor::from_array((
+            vec![1i64, mel_frames as i64, 128],
+            mel.to_vec(),
+        ))
+        .map_err(|e| format!("Mel tensor: {}", e))?;
+
+        let outputs = encoder
+            .run(ort::inputs!["mel_spectrogram" => mel_tensor])
+            .map_err(|e| format!("speaker_encoder error: {}", e))?;
+
+        let (_shape, data) = outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| format!("Speaker encoder output: {}", e))?;
+
+        Ok(data.to_vec())
     }
 
     // ── Prefill ───────────────────────────────────────────────────
 
     /// Run talker_prefill and return (last_logits, last_hidden, kv_cache_value, kv_seq_len).
-    ///
-    /// The KV cache is returned as an owned `DynValue` to avoid copying the
-    /// (potentially large) tensor data into a `Vec<f32>` each decode step.
     fn run_prefill(
         &mut self,
         embeddings: &[f32],
@@ -737,9 +1440,10 @@ impl Qwen3TTSEngine {
             }
         }
 
-        // Look up KV cache output name from session metadata before running
-        // (avoids borrow conflict with the mutable session.run() call).
-        let kv_output_name = self.talker_prefill.outputs().get(2)
+        let kv_output_name = self
+            .talker_prefill
+            .outputs()
+            .get(2)
             .map(|o| o.name().to_string())
             .ok_or_else(|| "Prefill: no output at index 2 for KV cache".to_string())?;
 
@@ -770,14 +1474,12 @@ impl Qwen3TTSEngine {
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("Prefill hidden extraction: {}", e))?;
 
-        // Extract last position logits and hidden (small copies, needed for processing)
         let last_logits_start = (seq_len - 1) * vocab_size;
         let last_logits = logits_data[last_logits_start..last_logits_start + vocab_size].to_vec();
 
         let last_hidden_start = (seq_len - 1) * h;
         let last_hidden = hidden_data[last_hidden_start..last_hidden_start + h].to_vec();
 
-        // Extract KV cache as owned DynValue (Arc::clone, no data copy).
         let kv_value = outputs
             .remove(&kv_output_name)
             .ok_or_else(|| format!("Prefill: missing '{}' output", kv_output_name))?;
@@ -788,15 +1490,6 @@ impl Qwen3TTSEngine {
     // ── Autoregressive Decode Loop ────────────────────────────────
 
     /// Run the autoregressive decode loop, producing codec frames.
-    /// Each frame is [first_code, predicted_code_0..14] = 16 codes.
-    ///
-    /// `trailing_text_hidden` contains T+1 text_project embeddings (text tokens + tts_eos).
-    /// At each decode step i, we add trailing_text_hidden[i] if i < len, else tts_pad_embed.
-    /// This "drip-feeds" text context into the decoder to maintain text–audio alignment.
-    ///
-    /// Optimizations:
-    /// - KV cache is kept as an owned `DynValue` (no f32 copy per step).
-    /// - code_predictor_embed inner loop reuses pre-allocated tensor buffers.
     fn run_decode_loop(
         &mut self,
         initial_logits: Vec<f32>,
@@ -815,27 +1508,25 @@ impl Qwen3TTSEngine {
         let mut cur_logits = initial_logits;
         let mut cur_hidden = initial_hidden;
 
-        // Look up actual KV cache output name from session metadata.
-        let kv_output_name = self.talker_decode.outputs().get(2)
+        let kv_output_name = self
+            .talker_decode
+            .outputs()
+            .get(2)
             .map(|o| o.name().to_string())
             .ok_or_else(|| "talker_decode: no output at index 2 for KV cache".to_string())?;
         let start = std::time::Instant::now();
         let mut rng = rand::thread_rng();
 
-        // Track generated first_codes for repetition penalty
         let mut generated_codes: Vec<i64> = Vec::new();
 
         for step in 0..max_steps {
-            // 1. Sample first_code from logits with temperature + top-k + repetition penalty
+            // 1. Sample first_code with repetition penalty + token suppression
             apply_repetition_penalty(
                 &mut cur_logits,
                 &generated_codes,
                 self.gen_config.repetition_penalty,
             );
 
-            // Token suppression: mask control tokens [2048, 3072) except EOS
-            // This prevents generating non-codec tokens and concentrates probability on
-            // valid codec tokens + EOS, matching the reference implementation.
             for i in 2048..3072 {
                 if i as i64 != cfg.codec_eos_token_id {
                     cur_logits[i] = f32::NEG_INFINITY;
@@ -849,7 +1540,6 @@ impl Qwen3TTSEngine {
                 &mut rng,
             ) as i64;
 
-            // Track for repetition penalty
             generated_codes.push(first_code);
 
             // 2. EOS check (after at least 2 steps)
@@ -858,25 +1548,20 @@ impl Qwen3TTSEngine {
                 break;
             }
 
-            // 3. Get codec embedding of first_code -> [hidden_size]
+            // 3. Get codec embedding of first_code
             let first_code_embed =
                 run_embed_single(&mut self.codec_embed, "input_ids", first_code)?;
 
             // 4. Autoregressive code_predictor: predict 15 codes
-            //    Uses repeated prefill (no KV cache) since the code predictor
-            //    processes only 2-16 tokens through 5 layers — negligible cost.
-            //    This avoids the DynamicCache Expand-shape issue in ONNX tracing.
             let cv = cfg.codec_vocab_size;
             let mut predicted_codes = [0i64; 15];
 
-            // Build input sequence: starts with [hidden, first_code_embed]
             let mut cp_embeds: Vec<f32> = Vec::with_capacity(17 * h);
             cp_embeds.extend_from_slice(&cur_hidden);
             cp_embeds.extend_from_slice(&first_code_embed);
             let mut cp_seq_len: i64 = 2;
 
             for group in 0..15i64 {
-                // Run full prefill with explicit position_ids + 4D causal mask
                 let seq = cp_seq_len as usize;
 
                 let cp_tensor = Tensor::from_array(
@@ -885,12 +1570,10 @@ impl Qwen3TTSEngine {
                 .map_err(|e| format!("CP prefill tensor: {}", e))?;
 
                 let cp_pos: Vec<i64> = (0..cp_seq_len).collect();
-                let cp_pos_tensor = Tensor::from_array(
-                    (vec![1i64, cp_seq_len], cp_pos),
-                )
-                .map_err(|e| format!("CP pos tensor: {}", e))?;
+                let cp_pos_tensor =
+                    Tensor::from_array((vec![1i64, cp_seq_len], cp_pos))
+                        .map_err(|e| format!("CP pos tensor: {}", e))?;
 
-                // 4D causal mask: [1, 1, seq, seq], 0.0=attend, -inf=mask
                 let mut mask = vec![0.0f32; seq * seq];
                 for i in 0..seq {
                     for j in (i + 1)..seq {
@@ -909,18 +1592,18 @@ impl Qwen3TTSEngine {
                         "position_ids" => cp_pos_tensor,
                         "attention_mask" => mask_tensor
                     ])
-                    .map_err(|e| format!("CP error at step {}, group {}: {}", step, group, e))?;
+                    .map_err(|e| {
+                        format!("CP error at step {}, group {}: {}", step, group, e)
+                    })?;
 
-                // all_logits: [1, seq_len, 15 * cv]
-                // Take last position, head [group]
                 let (_shape, logits_data) = cp_outputs[0]
                     .try_extract_tensor::<f32>()
                     .map_err(|e| format!("CP logits: {}", e))?;
 
                 let last_pos_offset = (cp_seq_len as usize - 1) * 15 * cv;
                 let head_offset = group as usize * cv;
-                let head_logits =
-                    &logits_data[last_pos_offset + head_offset..last_pos_offset + head_offset + cv];
+                let head_logits = &logits_data
+                    [last_pos_offset + head_offset..last_pos_offset + head_offset + cv];
 
                 predicted_codes[group as usize] = sample_top_k(
                     head_logits,
@@ -929,7 +1612,6 @@ impl Qwen3TTSEngine {
                     &mut rng,
                 ) as i64;
 
-                // Embed predicted code and append to sequence for next iteration
                 if group < 14 {
                     let code_embed = run_code_predictor_embed(
                         &mut self.code_predictor_embed,
@@ -941,7 +1623,7 @@ impl Qwen3TTSEngine {
                 }
             }
 
-            // 5. Embed all 16 codes: codec_embed(first_code) + sum(code_predictor_embed(group, code))
+            // 5. Embed all 16 codes: codec_embed(first_code) + sum(code_predictor_embed)
             let mut total_embed = first_code_embed;
 
             for group in 0..15i64 {
@@ -955,7 +1637,7 @@ impl Qwen3TTSEngine {
                 }
             }
 
-            // 6. Add trailing text hidden: drip-feed text_project embeddings per step
+            // 6. Add trailing text hidden
             let trailing_count = trailing_text_hidden.len() / h;
             if step < trailing_count {
                 let offset = step * h;
@@ -968,7 +1650,7 @@ impl Qwen3TTSEngine {
                 }
             }
 
-            // 7. Run talker_decode — pass KV cache as DynValue directly (no f32 copy)
+            // 7. Run talker_decode
             let embed_tensor =
                 Tensor::from_array((vec![1i64, 1i64, h as i64], total_embed))
                     .map_err(|e| format!("Decode embed tensor: {}", e))?;
@@ -987,7 +1669,6 @@ impl Qwen3TTSEngine {
                 ])
                 .map_err(|e| format!("talker_decode error at step {}: {}", step, e))?;
 
-            // Extract logits and hidden state as Vec<f32> (small, needed for processing)
             let (_shape, new_logits) = outputs[0]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| format!("Decode logits: {}", e))?;
@@ -998,22 +1679,16 @@ impl Qwen3TTSEngine {
             cur_logits = new_logits.to_vec();
             cur_hidden = new_hidden.to_vec();
 
-            // Keep KV cache as DynValue — Arc::clone via remove(), no data copy.
-            // This avoids copying the entire KV cache (~115 MB at step 500) every step.
-            kv_value = outputs
-                .remove(&kv_output_name)
-                .ok_or_else(|| {
-                    format!("Decode step {}: missing '{}' output", step, kv_output_name)
-                })?;
+            kv_value = outputs.remove(&kv_output_name).ok_or_else(|| {
+                format!("Decode step {}: missing '{}' output", step, kv_output_name)
+            })?;
             kv_seq_len += 1;
 
-            // Store frame: [first_code, predicted_codes[0..14]]
             let mut frame = [0i64; 16];
             frame[0] = first_code;
             frame[1..16].copy_from_slice(&predicted_codes);
             frames.push(frame);
 
-            // Log first 5 steps individually, then every 25th step
             if step < 5 || step % 25 == 0 {
                 let elapsed = start.elapsed().as_millis();
                 let rate = if elapsed > 0 {
@@ -1044,7 +1719,11 @@ impl Qwen3TTSEngine {
             } else {
                 0.0
             },
-            if hit_limit { " [HIT MAX STEPS — audio may be truncated]" } else { "" }
+            if hit_limit {
+                " [HIT MAX STEPS -- audio may be truncated]"
+            } else {
+                ""
+            }
         );
 
         Ok(frames)
@@ -1061,8 +1740,6 @@ impl Qwen3TTSEngine {
         let num_frames = frames.len();
         let num_groups = 16;
 
-        // Build audio_codes: [1, 16, num_frames] in row-major order
-        // Layout: for each group g, then each frame f: data[g * num_frames + f]
         let mut codes = vec![0i64; num_groups * num_frames];
         for f in 0..num_frames {
             for g in 0..num_groups {
@@ -1091,8 +1768,11 @@ impl Qwen3TTSEngine {
 
 // ── ONNX Helpers ─────────────────────────────────────────────────
 
-/// Run an embedding session on a single token ID, returning [hidden_size] flat data.
-fn run_embed_single(session: &mut Session, input_name: &str, token_id: i64) -> Result<Vec<f32>, String> {
+fn run_embed_single(
+    session: &mut Session,
+    input_name: &str,
+    token_id: i64,
+) -> Result<Vec<f32>, String> {
     let input = Tensor::from_array((vec![1i64, 1i64], vec![token_id]))
         .map_err(|e| format!("Embed single tensor: {}", e))?;
 
@@ -1107,8 +1787,11 @@ fn run_embed_single(session: &mut Session, input_name: &str, token_id: i64) -> R
     Ok(data.to_vec())
 }
 
-/// Run an embedding session on a batch of token IDs, returning [seq_len * hidden_size] flat data.
-fn run_embed_batch(session: &mut Session, input_name: &str, token_ids: &[i64]) -> Result<Vec<f32>, String> {
+fn run_embed_batch(
+    session: &mut Session,
+    input_name: &str,
+    token_ids: &[i64],
+) -> Result<Vec<f32>, String> {
     let seq_len = token_ids.len();
     let input = Tensor::from_array((vec![1i64, seq_len as i64], token_ids.to_vec()))
         .map_err(|e| format!("Embed batch tensor: {}", e))?;
@@ -1124,7 +1807,6 @@ fn run_embed_batch(session: &mut Session, input_name: &str, token_ids: &[i64]) -
     Ok(data.to_vec())
 }
 
-/// Run code_predictor_embed: group_idx [1] + input_ids [1,1] -> embeds [1,1,dim] -> flat [dim].
 fn run_code_predictor_embed(
     session: &mut Session,
     group_idx: i64,
@@ -1172,7 +1854,6 @@ fn load_session(path: &std::path::Path, name: &str) -> Result<Session, String> {
         .map_err(|e| format!("Failed to load {}: {}", name, e))
 }
 
-/// Apply repetition penalty to logits for tokens that have been previously generated.
 fn apply_repetition_penalty(logits: &mut [f32], generated: &[i64], penalty: f32) {
     if penalty == 1.0 {
         return;
@@ -1189,21 +1870,15 @@ fn apply_repetition_penalty(logits: &mut [f32], generated: &[i64], penalty: f32)
     }
 }
 
-/// Sample from logits using temperature scaling and top-k filtering.
-///
-/// Steps: scale by temperature → top-k filter → softmax → weighted random sample.
 fn sample_top_k(logits: &[f32], temperature: f32, top_k: usize, rng: &mut impl Rng) -> usize {
-    // Build (index, logit) pairs
     let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    indexed.sort_unstable_by(|a, b| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+    });
 
-    // Sort descending by logit value
-    indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Truncate to top-k
     let k = top_k.min(indexed.len()).max(1);
     indexed.truncate(k);
 
-    // Apply temperature and compute softmax
     let max_logit = indexed[0].1;
     let mut probs: Vec<(usize, f32)> = indexed
         .iter()
@@ -1218,7 +1893,6 @@ fn sample_top_k(logits: &[f32], temperature: f32, top_k: usize, rng: &mut impl R
         p.1 /= sum;
     }
 
-    // Weighted random sample
     let r: f32 = rng.gen();
     let mut cumulative = 0.0;
     for &(idx, prob) in &probs {
@@ -1228,11 +1902,9 @@ fn sample_top_k(logits: &[f32], temperature: f32, top_k: usize, rng: &mut impl R
         }
     }
 
-    // Fallback to highest probability
     probs[0].0
 }
 
-/// Linear interpolation resample for speed adjustment.
 fn resample_audio(audio: &[f32], speed: f32) -> Vec<f32> {
     if audio.is_empty() {
         return Vec::new();
@@ -1251,7 +1923,6 @@ fn resample_audio(audio: &[f32], speed: f32) -> Vec<f32> {
     resampled
 }
 
-/// Get current timestamp as milliseconds since epoch (for checkpoint logging).
 fn chrono_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1259,7 +1930,6 @@ fn chrono_millis() -> u128 {
         .as_millis()
 }
 
-/// Write audio samples as 16-bit PCM WAV.
 fn write_wav(audio: &[f32], sample_rate: u32, path: &Path) -> Result<(), String> {
     let spec = hound::WavSpec {
         channels: 1,
@@ -1283,4 +1953,210 @@ fn write_wav(audio: &[f32], sample_rate: u32, path: &Path) -> Result<(), String>
         .map_err(|e| format!("WAV finalize error: {}", e))?;
 
     Ok(())
+}
+
+// ── WAV Loading ─────────────────────────────────────────────────
+
+/// Load a WAV file and return (samples as f32 in [-1, 1], sample_rate).
+fn load_wav(path: &Path) -> Result<(Vec<f32>, u32), String> {
+    let reader =
+        hound::WavReader::open(path).map_err(|e| format!("Failed to open WAV: {}", e))?;
+
+    let spec = reader.spec();
+    let sample_rate = spec.sample_rate;
+
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Int => {
+            let max_val = (1i64 << (spec.bits_per_sample - 1)) as f32;
+            reader
+                .into_samples::<i32>()
+                .filter_map(|s| s.ok())
+                .map(|s| s as f32 / max_val)
+                .collect()
+        }
+        hound::SampleFormat::Float => reader
+            .into_samples::<f32>()
+            .filter_map(|s| s.ok())
+            .collect(),
+    };
+
+    // Convert stereo to mono by averaging channels
+    let samples = if spec.channels > 1 {
+        let ch = spec.channels as usize;
+        samples
+            .chunks(ch)
+            .map(|chunk| chunk.iter().sum::<f32>() / ch as f32)
+            .collect()
+    } else {
+        samples
+    };
+
+    log::info!(
+        "Loaded WAV: {} samples, {}Hz, {}ch, {}bit",
+        samples.len(),
+        sample_rate,
+        spec.channels,
+        spec.bits_per_sample
+    );
+
+    Ok((samples, sample_rate))
+}
+
+/// Simple linear interpolation resample to 24kHz.
+fn resample_to_24k(samples: &[f32], src_rate: u32) -> Vec<f32> {
+    if src_rate == SAMPLE_RATE {
+        return samples.to_vec();
+    }
+
+    let ratio = SAMPLE_RATE as f64 / src_rate as f64;
+    let new_len = (samples.len() as f64 * ratio) as usize;
+    let mut resampled = Vec::with_capacity(new_len);
+
+    for i in 0..new_len {
+        let src_idx = i as f64 / ratio;
+        let idx0 = src_idx as usize;
+        let idx1 = (idx0 + 1).min(samples.len() - 1);
+        let frac = (src_idx - idx0 as f64) as f32;
+        resampled.push(samples[idx0] * (1.0 - frac) + samples[idx1] * frac);
+    }
+
+    log::info!(
+        "Resampled: {}Hz -> {}Hz ({} -> {} samples)",
+        src_rate,
+        SAMPLE_RATE,
+        samples.len(),
+        resampled.len()
+    );
+
+    resampled
+}
+
+// ── Mel Spectrogram Extraction ──────────────────────────────────
+
+/// Extract log mel spectrogram from audio samples.
+///
+/// Parameters matching the ECAPA-TDNN speaker encoder:
+///   - sample_rate: 24000
+///   - n_fft: 1024
+///   - hop_length: 256
+///   - n_mels: 128
+///   - fmin: 0, fmax: sample_rate/2
+///
+/// Returns flat [T, 128] mel spectrogram.
+fn extract_mel(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    use rustfft::num_complex::Complex;
+    use rustfft::FftPlanner;
+
+    let n_fft: usize = 1024;
+    let hop_length: usize = 256;
+    let n_mels: usize = 128;
+    let fmax = sample_rate as f64 / 2.0;
+
+    // Build Hann window
+    let window: Vec<f32> = (0..n_fft)
+        .map(|i| {
+            0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / n_fft as f32).cos())
+        })
+        .collect();
+
+    // STFT
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_forward(n_fft);
+
+    let num_frames = if samples.len() >= n_fft {
+        (samples.len() - n_fft) / hop_length + 1
+    } else {
+        1
+    };
+    let freq_bins = n_fft / 2 + 1;
+
+    let mut power_spec = vec![0.0f64; num_frames * freq_bins];
+
+    for frame_idx in 0..num_frames {
+        let start = frame_idx * hop_length;
+        let mut buffer: Vec<Complex<f32>> = (0..n_fft)
+            .map(|i| {
+                let sample = if start + i < samples.len() {
+                    samples[start + i]
+                } else {
+                    0.0
+                };
+                Complex::new(sample * window[i], 0.0)
+            })
+            .collect();
+
+        fft.process(&mut buffer);
+
+        for bin in 0..freq_bins {
+            let mag = buffer[bin].norm();
+            power_spec[frame_idx * freq_bins + bin] = (mag * mag) as f64;
+        }
+    }
+
+    // Build mel filterbank
+    let mel_filterbank = build_mel_filterbank(n_mels, freq_bins, sample_rate as f64, 0.0, fmax);
+
+    // Apply mel filterbank
+    let mut mel = vec![0.0f32; num_frames * n_mels];
+    for frame in 0..num_frames {
+        for mel_bin in 0..n_mels {
+            let mut sum = 0.0f64;
+            for freq_bin in 0..freq_bins {
+                sum += mel_filterbank[mel_bin * freq_bins + freq_bin]
+                    * power_spec[frame * freq_bins + freq_bin];
+            }
+            // Log mel (add small epsilon to avoid log(0))
+            mel[frame * n_mels + mel_bin] = (sum.max(1e-10).ln()) as f32;
+        }
+    }
+
+    mel
+}
+
+/// Build a mel filterbank matrix [n_mels, freq_bins].
+fn build_mel_filterbank(
+    n_mels: usize,
+    freq_bins: usize,
+    sr: f64,
+    fmin: f64,
+    fmax: f64,
+) -> Vec<f64> {
+    let hz_to_mel = |hz: f64| -> f64 { 2595.0 * (1.0 + hz / 700.0).log10() };
+    let mel_to_hz = |mel: f64| -> f64 { 700.0 * (10.0_f64.powf(mel / 2595.0) - 1.0) };
+
+    let mel_min = hz_to_mel(fmin);
+    let mel_max = hz_to_mel(fmax);
+
+    // n_mels + 2 points evenly spaced in mel scale
+    let mel_points: Vec<f64> = (0..=n_mels + 1)
+        .map(|i| mel_min + (mel_max - mel_min) * i as f64 / (n_mels + 1) as f64)
+        .collect();
+
+    let hz_points: Vec<f64> = mel_points.iter().map(|&m| mel_to_hz(m)).collect();
+
+    // Convert Hz to FFT bin indices
+    let n_fft = (freq_bins - 1) * 2;
+    let bin_points: Vec<f64> = hz_points
+        .iter()
+        .map(|&hz| hz * n_fft as f64 / sr)
+        .collect();
+
+    let mut filterbank = vec![0.0f64; n_mels * freq_bins];
+
+    for m in 0..n_mels {
+        let f_left = bin_points[m];
+        let f_center = bin_points[m + 1];
+        let f_right = bin_points[m + 2];
+
+        for k in 0..freq_bins {
+            let kf = k as f64;
+            if kf >= f_left && kf <= f_center && f_center > f_left {
+                filterbank[m * freq_bins + k] = (kf - f_left) / (f_center - f_left);
+            } else if kf > f_center && kf <= f_right && f_right > f_center {
+                filterbank[m * freq_bins + k] = (f_right - kf) / (f_right - f_center);
+            }
+        }
+    }
+
+    filterbank
 }

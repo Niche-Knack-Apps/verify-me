@@ -122,6 +122,7 @@ pub async fn voice_clone(
     text: String,
     reference_audio: String,
     model_id: String,
+    speed: Option<f32>,
 ) -> Result<String, String> {
     ensure_engine_state(&app);
 
@@ -129,7 +130,8 @@ pub async fn voice_clone(
     let model_dir = resolve_model_dir(&app, &model_id)?;
     let output_path = generate_output_path("clone")?;
 
-    log::info!("Voice clone request: model={}, ref={}, text={}...", model_id, reference_audio, &text[..std::cmp::min(text.len(), 50)]);
+    let speed = speed.unwrap_or(1.0);
+    log::info!("Voice clone request: model={}, ref={}, speed={}, text={}...", model_id, reference_audio, speed, &text[..std::cmp::min(text.len(), 50)]);
 
     // Single lock acquisition: check/switch model + run inference atomically
     let engine_state = app.state::<EngineState>().inner().clone();
@@ -156,6 +158,7 @@ pub async fn voice_clone(
         engine.clone_voice(
             &text_clone,
             std::path::Path::new(&ref_audio_clone),
+            speed,
             std::path::Path::new(&output_clone),
         )
     });
