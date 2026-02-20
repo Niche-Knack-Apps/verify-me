@@ -149,13 +149,14 @@ impl OnnxEngine {
         reference_audio: &Path,
         speed: f32,
         output_path: &Path,
+        checkpoint_tx: Option<&std::sync::mpsc::Sender<serde_json::Value>>,
     ) -> Result<(), String> {
         match self.engine.as_mut() {
             Some(ActiveEngine::PocketTTS(engine)) => {
                 engine.clone_voice(text, reference_audio, output_path)
             }
             Some(ActiveEngine::Qwen3TTS(engine)) => {
-                engine.clone_voice(text, reference_audio, speed, output_path)
+                engine.clone_voice(text, reference_audio, speed, output_path, checkpoint_tx)
             }
             #[cfg(debug_assertions)]
             Some(ActiveEngine::Qwen3Safetensors(engine)) => {

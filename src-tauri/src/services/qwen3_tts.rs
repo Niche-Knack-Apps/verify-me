@@ -711,6 +711,7 @@ impl Qwen3TTSEngine {
         reference_audio: &Path,
         speed: f32,
         output_path: &Path,
+        checkpoint_tx: Option<&std::sync::mpsc::Sender<serde_json::Value>>,
     ) -> Result<(), String> {
         self.ensure_variant(Qwen3Variant::Base)?;
 
@@ -744,43 +745,113 @@ impl Qwen3TTSEngine {
         } else {
             samples
         };
+        let ref_duration_s = samples.len() as f32 / SAMPLE_RATE as f32;
+        let ref_load_ms = t.elapsed().as_millis();
         log::info!(
             "Reference audio: {} samples ({:.1}s) at {}Hz ({} ms)",
             samples.len(),
-            samples.len() as f32 / SAMPLE_RATE as f32,
+            ref_duration_s,
             SAMPLE_RATE,
-            t.elapsed().as_millis()
+            ref_load_ms
         );
+        if let Some(tx) = checkpoint_tx {
+            let _ = tx.send(serde_json::json!({
+                "engine": "onnx",
+                "stage": "ref_audio_loaded",
+                "timestamp": chrono_millis(),
+                "data": {
+                    "mode": "voice_clone",
+                    "ref_path": reference_audio.display().to_string(),
+                    "ref_samples": samples.len(),
+                    "ref_duration_s": ref_duration_s,
+                    "ref_sample_rate": SAMPLE_RATE,
+                    "original_sample_rate": ref_sr,
+                    "elapsed_ms": ref_load_ms,
+                }
+            }));
+        }
 
         // 2. Extract mel spectrogram and run speaker encoder
         let t = std::time::Instant::now();
         let mel = extract_mel(&samples, SAMPLE_RATE);
         let mel_frames = mel.len() / 128;
+        let mel_ms = t.elapsed().as_millis();
         log::info!(
             "Mel spectrogram: {} frames x 128 bins ({} ms)",
             mel_frames,
-            t.elapsed().as_millis()
+            mel_ms
         );
+        if let Some(tx) = checkpoint_tx {
+            let first_8_mel: Vec<f32> = mel.iter().take(8).copied().collect();
+            let _ = tx.send(serde_json::json!({
+                "engine": "onnx",
+                "stage": "mel_spectrogram",
+                "timestamp": chrono_millis(),
+                "data": {
+                    "mode": "voice_clone",
+                    "mel_frames": mel_frames,
+                    "mel_bins": 128,
+                    "first_8_values": first_8_mel,
+                    "elapsed_ms": mel_ms,
+                }
+            }));
+        }
 
         let t = std::time::Instant::now();
         let speaker_embed = self.run_speaker_encoder(&mel, mel_frames)?;
+        let spk_ms = t.elapsed().as_millis();
         log::info!(
             "Speaker embedding: {} dims ({} ms)",
             speaker_embed.len(),
-            t.elapsed().as_millis()
+            spk_ms
         );
+        if let Some(tx) = checkpoint_tx {
+            let first_8_spk: Vec<f32> = speaker_embed.iter().take(8).copied().collect();
+            let spk_norm: f32 = speaker_embed.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let _ = tx.send(serde_json::json!({
+                "engine": "onnx",
+                "stage": "speaker_encoder",
+                "timestamp": chrono_millis(),
+                "data": {
+                    "mode": "voice_clone",
+                    "embedding_dims": speaker_embed.len(),
+                    "first_8_values": first_8_spk,
+                    "l2_norm": spk_norm,
+                    "elapsed_ms": spk_ms,
+                }
+            }));
+        }
 
         // 3. Build clone prompt embeddings with speaker embedding injected
         let t = std::time::Instant::now();
-        let (embeddings, seq_len, trailing_text_hidden, _text_token_ids) =
+        let (embeddings, seq_len, trailing_text_hidden, text_token_ids) =
             self.build_clone_embeddings(text, &speaker_embed)?;
         let trailing_len = trailing_text_hidden.len() / self.config.hidden_size;
+        let embed_ms = t.elapsed().as_millis();
         log::info!(
             "[1/5] Clone embeddings: seq_len={}, trailing={} tokens ({} ms)",
             seq_len,
             trailing_len,
-            t.elapsed().as_millis()
+            embed_ms
         );
+        if let Some(tx) = checkpoint_tx {
+            let first_8: Vec<f32> = embeddings.iter().take(8).copied().collect();
+            let _ = tx.send(serde_json::json!({
+                "engine": "onnx",
+                "stage": "embedding",
+                "timestamp": chrono_millis(),
+                "data": {
+                    "mode": "voice_clone",
+                    "text": &text[..std::cmp::min(text.len(), 200)],
+                    "text_len": text.len(),
+                    "seq_len": seq_len,
+                    "trailing_tokens": trailing_len,
+                    "text_token_ids": text_token_ids,
+                    "first_8_values": first_8,
+                    "elapsed_ms": embed_ms,
+                }
+            }));
+        }
 
         // 4-6. Shared inference pipeline (voice clone has no instruct)
         self.run_inference_pipeline(
@@ -790,7 +861,7 @@ impl Qwen3TTSEngine {
             &trailing_text_hidden,
             speed,
             output_path,
-            None,
+            checkpoint_tx,
             "voice_clone",
             total_start,
             false,
@@ -1536,7 +1607,7 @@ impl Qwen3TTSEngine {
         .map_err(|e| format!("Mel tensor: {}", e))?;
 
         let outputs = encoder
-            .run(ort::inputs!["mel_spectrogram" => mel_tensor])
+            .run(ort::inputs!["mels" => mel_tensor])
             .map_err(|e| format!("speaker_encoder error: {}", e))?;
 
         let (_shape, data) = outputs[0]
@@ -2221,6 +2292,10 @@ fn resample_to_24k(samples: &[f32], src_rate: u32) -> Vec<f32> {
 ///   - fmin: 0, fmax: sample_rate/2
 ///
 /// Returns flat [T, 128] mel spectrogram.
+/// Extract log-magnitude mel spectrogram matching Python's mel_spectrogram() exactly.
+///
+/// Python pipeline: reflect pad → STFT → magnitude (sqrt) → mel filterbank (slaney norm) → log
+/// Parameters: n_fft=1024, hop=256, n_mels=128, fmin=0, fmax=12000, sr=24000
 fn extract_mel(samples: &[f32], sample_rate: u32) -> Vec<f32> {
     use rustfft::num_complex::Complex;
     use rustfft::FftPlanner;
@@ -2228,34 +2303,56 @@ fn extract_mel(samples: &[f32], sample_rate: u32) -> Vec<f32> {
     let n_fft: usize = 1024;
     let hop_length: usize = 256;
     let n_mels: usize = 128;
-    let fmax = sample_rate as f64 / 2.0;
+    let fmax: f64 = 12000.0;
 
-    // Build Hann window
+    // Reflect-pad signal: (n_fft - hop_length) / 2 = 384 samples on each side
+    // Matches Python: F.pad(y, (pad, pad), mode="reflect")
+    let pad = (n_fft - hop_length) / 2;
+    let padded_len = pad + samples.len() + pad;
+    let mut padded = Vec::with_capacity(padded_len);
+    // Left reflect pad
+    for i in (1..=pad).rev() {
+        let idx = if i < samples.len() { i } else { samples.len() - 1 };
+        padded.push(samples[idx]);
+    }
+    padded.extend_from_slice(samples);
+    // Right reflect pad
+    for i in 1..=pad {
+        let idx = if samples.len() > i + 1 {
+            samples.len() - 1 - i
+        } else {
+            0
+        };
+        padded.push(samples[idx]);
+    }
+
+    // Build Hann window (periodic, matching torch.hann_window)
     let window: Vec<f32> = (0..n_fft)
         .map(|i| {
             0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / n_fft as f32).cos())
         })
         .collect();
 
-    // STFT
+    // STFT (center=False since we already padded)
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(n_fft);
 
-    let num_frames = if samples.len() >= n_fft {
-        (samples.len() - n_fft) / hop_length + 1
+    let num_frames = if padded.len() >= n_fft {
+        (padded.len() - n_fft) / hop_length + 1
     } else {
         1
     };
     let freq_bins = n_fft / 2 + 1;
 
-    let mut power_spec = vec![0.0f64; num_frames * freq_bins];
+    // Magnitude spectrogram (NOT power) — matches Python: sqrt(real^2 + imag^2 + 1e-9)
+    let mut mag_spec = vec![0.0f64; num_frames * freq_bins];
 
     for frame_idx in 0..num_frames {
         let start = frame_idx * hop_length;
         let mut buffer: Vec<Complex<f32>> = (0..n_fft)
             .map(|i| {
-                let sample = if start + i < samples.len() {
-                    samples[start + i]
+                let sample = if start + i < padded.len() {
+                    padded[start + i]
                 } else {
                     0.0
                 };
@@ -2266,32 +2363,35 @@ fn extract_mel(samples: &[f32], sample_rate: u32) -> Vec<f32> {
         fft.process(&mut buffer);
 
         for bin in 0..freq_bins {
-            let mag = buffer[bin].norm();
-            power_spec[frame_idx * freq_bins + bin] = (mag * mag) as f64;
+            let re = buffer[bin].re as f64;
+            let im = buffer[bin].im as f64;
+            mag_spec[frame_idx * freq_bins + bin] = (re * re + im * im + 1e-9).sqrt();
         }
     }
 
-    // Build mel filterbank
-    let mel_filterbank = build_mel_filterbank(n_mels, freq_bins, sample_rate as f64, 0.0, fmax);
+    // Build mel filterbank with slaney normalization (matches librosa default)
+    let mel_filterbank =
+        build_mel_filterbank(n_mels, freq_bins, sample_rate as f64, 0.0, fmax);
 
-    // Apply mel filterbank
+    // Apply mel filterbank + log compression
+    // Python: torch.log(torch.clamp(mel_output, min=1e-5))
     let mut mel = vec![0.0f32; num_frames * n_mels];
     for frame in 0..num_frames {
         for mel_bin in 0..n_mels {
             let mut sum = 0.0f64;
             for freq_bin in 0..freq_bins {
                 sum += mel_filterbank[mel_bin * freq_bins + freq_bin]
-                    * power_spec[frame * freq_bins + freq_bin];
+                    * mag_spec[frame * freq_bins + freq_bin];
             }
-            // Log mel (add small epsilon to avoid log(0))
-            mel[frame * n_mels + mel_bin] = (sum.max(1e-10).ln()) as f32;
+            mel[frame * n_mels + mel_bin] = (sum.max(1e-5).ln()) as f32;
         }
     }
 
     mel
 }
 
-/// Build a mel filterbank matrix [n_mels, freq_bins].
+/// Build a mel filterbank matrix [n_mels, freq_bins] with slaney normalization.
+/// Matches librosa.filters.mel(norm='slaney') — the default in librosa >= 0.8.
 fn build_mel_filterbank(
     n_mels: usize,
     freq_bins: usize,
@@ -2332,6 +2432,16 @@ fn build_mel_filterbank(
                 filterbank[m * freq_bins + k] = (kf - f_left) / (f_center - f_left);
             } else if kf > f_center && kf <= f_right && f_right > f_center {
                 filterbank[m * freq_bins + k] = (f_right - kf) / (f_right - f_center);
+            }
+        }
+
+        // Slaney normalization: normalize each filter by its bandwidth
+        // enorm = 2.0 / (hz_points[m+2] - hz_points[m])
+        let bandwidth = hz_points[m + 2] - hz_points[m];
+        if bandwidth > 0.0 {
+            let enorm = 2.0 / bandwidth;
+            for k in 0..freq_bins {
+                filterbank[m * freq_bins + k] *= enorm;
             }
         }
     }

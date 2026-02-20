@@ -133,6 +133,9 @@ pub async fn voice_clone(
     let speed = speed.unwrap_or(1.0);
     log::info!("Voice clone request: model={}, ref={}, speed={}, text={}...", model_id, reference_audio, speed, &text[..std::cmp::min(text.len(), 50)]);
 
+    // Create checkpoint channel for debug logging
+    let (checkpoint_tx, checkpoint_rx) = std::sync::mpsc::channel::<serde_json::Value>();
+
     // Single lock acquisition: check/switch model + run inference atomically
     let engine_state = app.state::<EngineState>().inner().clone();
     let text_clone = text.clone();
@@ -160,20 +163,29 @@ pub async fn voice_clone(
             std::path::Path::new(&ref_audio_clone),
             speed,
             std::path::Path::new(&output_clone),
+            Some(&checkpoint_tx),
         )
     });
 
-    match tokio::time::timeout(GENERATION_TIMEOUT, task).await {
+    let result = match tokio::time::timeout(GENERATION_TIMEOUT, task).await {
         Ok(join_result) => {
-            join_result.map_err(|e| format!("Voice clone task panicked: {}", e))??;
+            join_result.map_err(|e| format!("Voice clone task panicked: {}", e))?
         }
         Err(_) => {
-            return Err(format!(
+            Err(format!(
                 "Voice cloning timed out after {}s. The model may be too large for CPU inference — try Pocket TTS or quantized models.",
                 GENERATION_TIMEOUT.as_secs()
-            ));
+            ))
         }
+    };
+
+    // Always drain checkpoint events (even on error — partial checkpoints aid debugging)
+    while let Ok(checkpoint) = checkpoint_rx.try_recv() {
+        let _ = app.emit("tts-checkpoint", &checkpoint);
     }
+
+    // Propagate any generation error after draining checkpoints
+    result?;
 
     log::info!("Voice clone generated: {}", output_path);
     Ok(output_path)
