@@ -55,7 +55,6 @@ fn main() {
             tts::get_voices,
             models::list_models,
             models::download_model,
-            models::download_hf_model,
             models::delete_model,
             models::get_models_directory,
             models::open_models_directory,
