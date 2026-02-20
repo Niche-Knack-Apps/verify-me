@@ -213,9 +213,17 @@ impl HfTokenizer {
         // Try tokenizer.json first (pre-built, most reliable)
         let json_path = model_dir.join("tokenizer.json");
         if json_path.exists() {
-            let inner = tokenizers::Tokenizer::from_file(&json_path)
+            let mut inner = tokenizers::Tokenizer::from_file(&json_path)
                 .map_err(|e| format!("Failed to load tokenizer.json: {}", e))?;
             log::info!("Loaded HF tokenizer from tokenizer.json");
+
+            // Load special tokens from tokenizer_config.json (they're often missing
+            // from tokenizer.json but defined in added_tokens_decoder).
+            let config_path = model_dir.join("tokenizer_config.json");
+            if config_path.exists() {
+                Self::load_special_tokens_from_config(&mut inner, &config_path)?;
+            }
+
             return Ok(Self { inner });
         }
 
@@ -251,6 +259,61 @@ impl HfTokenizer {
 
         log::info!("Built HF tokenizer from vocab.json + merges.txt (ByteLevel BPE)");
         Ok(Self { inner })
+    }
+
+    /// Load special tokens from tokenizer_config.json's `added_tokens_decoder`.
+    ///
+    /// Many HuggingFace models store special tokens (like `<|im_start|>`,
+    /// `<|im_end|>`) in tokenizer_config.json rather than tokenizer.json.
+    /// Without these, the tokenizer treats them as regular text and splits
+    /// them into byte-level BPE tokens instead of single special token IDs.
+    fn load_special_tokens_from_config(
+        tokenizer: &mut tokenizers::Tokenizer,
+        config_path: &Path,
+    ) -> Result<(), String> {
+        let data = std::fs::read_to_string(config_path)
+            .map_err(|e| format!("Failed to read tokenizer_config.json: {}", e))?;
+        let config: serde_json::Value = serde_json::from_str(&data)
+            .map_err(|e| format!("Failed to parse tokenizer_config.json: {}", e))?;
+
+        let Some(added_tokens) = config.get("added_tokens_decoder").and_then(|v| v.as_object())
+        else {
+            return Ok(());
+        };
+
+        // Collect tokens that aren't already in the tokenizer
+        let existing = tokenizer.get_added_tokens_decoder();
+        let mut special_tokens: Vec<tokenizers::AddedToken> = Vec::new();
+
+        for (id_str, info) in added_tokens {
+            let id: u32 = match id_str.parse() {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+            if existing.contains_key(&id) {
+                continue;
+            }
+            let content = match info.get("content").and_then(|v| v.as_str()) {
+                Some(c) => c,
+                None => continue,
+            };
+            let is_special = info
+                .get("special")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            special_tokens.push(tokenizers::AddedToken::from(content, is_special));
+        }
+
+        if !special_tokens.is_empty() {
+            let count = tokenizer.add_special_tokens(&special_tokens);
+            log::info!(
+                "Added {} special tokens from tokenizer_config.json",
+                count
+            );
+        }
+
+        Ok(())
     }
 
     pub fn tokenize(&self, text: &str) -> Vec<i64> {

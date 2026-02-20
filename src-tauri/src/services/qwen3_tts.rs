@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const SAMPLE_RATE: u32 = 24000;
-/// Absolute ceiling — the model should always hit EOS before this.
-const MAX_STEPS_ABSOLUTE: usize = 4096;
+/// Absolute ceiling — no single generation should exceed ~2 min of audio.
+const MAX_STEPS_ABSOLUTE: usize = 1500;
 /// ~12 Hz codec: frames per second of audio output.
 const CODEC_FPS: f64 = 12.0;
 /// Generous safety multiplier over the estimated duration.
@@ -17,6 +17,10 @@ const SAFETY_MULTIPLIER: f64 = 3.0;
 const MIN_MAX_STEPS: usize = 48; // ~4s of audio
 /// Maximum reference audio duration in seconds for voice cloning.
 const MAX_REF_SECONDS: f32 = 15.0;
+/// Wall-clock timeout for the decode loop (seconds). Prevents infinite hangs.
+const GENERATION_TIMEOUT_SECS: u64 = 120;
+/// Minimum available system memory (MB) required before loading a variant.
+const MIN_AVAILABLE_MEMORY_MB: u64 = 1500;
 
 /// Estimate a reasonable max decode steps based on text length.
 ///
@@ -92,6 +96,7 @@ struct Qwen3TTSConfig {
     codec_eos_token_id: i64,
     codec_pad_id: i64,
     codec_think_id: i64,
+    codec_nothink_id: i64,
     codec_think_bos_id: i64,
     codec_think_eos_id: i64,
 
@@ -175,6 +180,7 @@ impl Qwen3TTSConfig {
             codec_eos_token_id: talker["codec_eos_token_id"].as_i64().unwrap_or(2150),
             codec_pad_id: talker["codec_pad_id"].as_i64().unwrap_or(2148),
             codec_think_id: talker["codec_think_id"].as_i64().unwrap_or(2154),
+            codec_nothink_id: talker["codec_nothink_id"].as_i64().unwrap_or(2155),
             codec_think_bos_id: talker["codec_think_bos_id"].as_i64().unwrap_or(2156),
             codec_think_eos_id: talker["codec_think_eos_id"].as_i64().unwrap_or(2157),
             tts_bos: config["tts_bos_token_id"].as_i64().unwrap_or(151672),
@@ -380,7 +386,11 @@ impl Qwen3TTSEngine {
     }
 
     /// Switch to a different model variant if not already loaded.
-    /// Reloads all ONNX sessions from the sibling variant directory.
+    ///
+    /// Replaces ONNX sessions **one at a time** so peak memory overhead is only
+    /// 1 duplicate session (~200-400 MB) instead of an entire duplicate engine
+    /// (~1.7 GB). Rust's assignment drops the old session before the new one
+    /// takes its place.
     fn ensure_variant(&mut self, target: Qwen3Variant) -> Result<(), String> {
         if self.variant == target {
             return Ok(());
@@ -401,11 +411,93 @@ impl Qwen3TTSEngine {
             ));
         }
 
-        let new_engine =
-            Self::initialize_variant(&variant_dir, &self.models_parent_dir, target)?;
+        // Check available system memory before loading
+        if let Some(avail_mb) = available_memory_mb() {
+            log::info!("Available system memory: {} MB", avail_mb);
+            if avail_mb < MIN_AVAILABLE_MEMORY_MB {
+                return Err(format!(
+                    "Insufficient memory to switch model variant. Available: {} MB, required: {} MB. \
+                     Close other applications and try again.",
+                    avail_mb, MIN_AVAILABLE_MEMORY_MB
+                ));
+            }
+        }
 
-        // Replace self with the new engine
-        *self = new_engine;
+        // Reload config, generation config, and tokenizer from new variant
+        let config = Qwen3TTSConfig::load(&variant_dir)?;
+        let gen_config = GenerationConfig::load(&variant_dir);
+        let tokenizer = HfTokenizer::load(&variant_dir)?;
+
+        log::info!(
+            "Config: hidden={}, layers={}, kv_heads={}, head_dim={}, speakers={}",
+            config.hidden_size,
+            config.num_hidden_layers,
+            config.num_kv_heads,
+            config.head_dim,
+            config.spk_id.len()
+        );
+
+        // Replace sessions one at a time — each assignment drops the old session
+        // before allocating the new one, keeping peak memory to ~1 extra session.
+        log::info!("Replacing ONNX sessions incrementally...");
+
+        self.text_project = load_session(&variant_dir.join("text_project.onnx"), "text_project")?;
+        self.codec_embed = load_session(&variant_dir.join("codec_embed.onnx"), "codec_embed")?;
+        self.code_predictor_prefill = load_session(
+            &variant_dir.join("code_predictor_prefill.onnx"),
+            "code_predictor_prefill",
+        )?;
+        self.code_predictor_embed = load_session(
+            &variant_dir.join("code_predictor_embed.onnx"),
+            "code_predictor_embed",
+        )?;
+        self.talker_prefill =
+            load_session(&variant_dir.join("talker_prefill.onnx"), "talker_prefill")?;
+        self.talker_decode =
+            load_session(&variant_dir.join("talker_decode.onnx"), "talker_decode")?;
+
+        // tokenizer12hz_decode may be in variant dir or shared from qwen3-tts
+        let tok_decode_path = variant_dir.join("tokenizer12hz_decode.onnx");
+        let tok_decode_path = if tok_decode_path.exists() {
+            tok_decode_path
+        } else {
+            let shared = self
+                .models_parent_dir
+                .join("qwen3-tts")
+                .join("tokenizer12hz_decode.onnx");
+            if shared.exists() {
+                log::info!("Using shared tokenizer12hz_decode from qwen3-tts");
+                shared
+            } else {
+                return Err(format!(
+                    "tokenizer12hz_decode.onnx not found in {} or shared location",
+                    variant_dir.display()
+                ));
+            }
+        };
+        self.tokenizer12hz_decode = load_session(&tok_decode_path, "tokenizer12hz_decode")?;
+
+        // Speaker encoder is optional (only Base variant)
+        let speaker_encoder_path = variant_dir.join("speaker_encoder.onnx");
+        self.speaker_encoder = if speaker_encoder_path.exists() {
+            Some(load_session(&speaker_encoder_path, "speaker_encoder")?)
+        } else {
+            log::info!("No speaker_encoder — voice cloning unavailable for this variant");
+            None
+        };
+
+        // Update non-session fields
+        self.config = config;
+        self.gen_config = gen_config;
+        self.tokenizer = tokenizer;
+
+        // Recompute tts_pad_embed from the new text_project
+        self.tts_pad_embed =
+            run_embed_single(&mut self.text_project, "input_ids", self.config.tts_pad)?;
+        log::info!("Cached tts_pad_embed: {} floats", self.tts_pad_embed.len());
+
+        self.variant = target;
+        log::info!("Variant switch to {} complete", target);
 
         Ok(())
     }
@@ -822,18 +914,15 @@ impl Qwen3TTSEngine {
             }));
         }
 
-        // 5. Peak-normalize audio to consistent loudness
+        // 5. Clip audio to [-1.0, 1.0] (no peak normalization — preserve
+        //    amplitude dynamics so whispers stay quiet and shouts stay loud)
         let peak = audio.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        if peak > 1e-6 {
-            let gain = 0.95 / peak;
+        if peak > 1.0 {
+            let gain = 1.0 / peak;
             for s in &mut audio {
                 *s *= gain;
             }
-            log::info!(
-                "[4.5] Peak-normalized: peak {:.4} -> 0.95 (gain {:.2}x)",
-                peak,
-                gain
-            );
+            log::info!("[4.5] Clipped: peak {:.4} -> 1.0", peak);
         }
 
         // 6. Speed adjustment + write WAV
@@ -979,15 +1068,17 @@ impl Qwen3TTSEngine {
         run_embed_batch(&mut self.text_project, "input_ids", &instruct_ids)
     }
 
-    /// Build the full prompt embedding sequence for CustomVoice TTS.
+    /// Build the full prompt embedding sequence for CustomVoice TTS (non-streaming mode).
     ///
-    /// Layout without instruct:
-    ///   [role(3), mixed(6), first_text+codec_bos(1)] = 10 positions
+    /// Non-streaming mode puts ALL text tokens in the prefill so the model has
+    /// full text context when generating speech. This is required for instruct
+    /// (voice instructions) to work correctly.
     ///
-    /// Layout with instruct:
-    ///   [instruct(N), role(3), mixed(6), first_text+codec_bos(1)] = N + 10 positions
+    /// Layout:
+    ///   [instruct(N)?, role(3), mixed(6), text_tokens+codec_pad, tts_eos+codec_pad, tts_pad+codec_bos]
     ///
     /// Returns (flat_embeddings, prefill_len, trailing_text_hidden, text_token_ids).
+    /// trailing_text_hidden is tts_pad_embed (constant for all decode steps).
     fn build_prompt_embeddings(
         &mut self,
         text: &str,
@@ -1043,30 +1134,34 @@ impl Qwen3TTSEngine {
         };
         let instruct_positions = instruct_embeds.as_ref().map_or(0, |e| e.len() / h);
 
-        // Core prefill: [role(3), mixed(6), first_text(1)] = 10 positions
-        let core_len = 10;
-        let prefill_len = instruct_positions + core_len;
+        // Non-streaming layout:
+        //   [instruct(N)?, role(3), mixed(6), text_tokens+codec_pad(T), tts_eos+codec_pad(1), tts_pad+codec_bos(1)]
+        // Total = N + 3 + 6 + T + 1 + 1 = N + T + 11
+        let prefill_len = instruct_positions + 3 + 6 + text_len + 1 + 1;
 
-        // ── Build text token IDs for core prefill ──
+        // ── Build text token IDs for role + mixed section (9 positions) ──
         let newline: i64 = 198;
-        let mut text_ids: Vec<i64> = Vec::with_capacity(core_len);
+        let role_mixed_len = 9;
+        let mut role_mixed_ids: Vec<i64> = Vec::with_capacity(role_mixed_len);
         // Role prefix (3)
-        text_ids.push(im_start);
-        text_ids.push(assistant);
-        text_ids.push(newline);
+        role_mixed_ids.push(im_start);
+        role_mixed_ids.push(assistant);
+        role_mixed_ids.push(newline);
         // Mixed text side (6): tts_pad × 5 + tts_bos
         for _ in 0..5 {
-            text_ids.push(tts_pad);
+            role_mixed_ids.push(tts_pad);
         }
-        text_ids.push(tts_bos);
-        // First text token (1)
-        text_ids.push(text_tokens[0]);
+        role_mixed_ids.push(tts_bos);
 
-        assert_eq!(text_ids.len(), core_len);
+        let role_mixed_embeds =
+            run_embed_batch(&mut self.text_project, "input_ids", &role_mixed_ids)?;
 
-        // Run text_project on core tokens → [1, 10, hidden_size]
-        let text_embeds = run_embed_batch(&mut self.text_project, "input_ids", &text_ids)?;
-        assert_eq!(text_embeds.len(), core_len * h);
+        // ── Build text token embeddings for ALL text tokens + tts_eos ──
+        let mut text_and_eos_ids: Vec<i64> = Vec::with_capacity(text_len + 1);
+        text_and_eos_ids.extend_from_slice(&text_tokens);
+        text_and_eos_ids.push(tts_eos);
+        let text_and_eos_embeds =
+            run_embed_batch(&mut self.text_project, "input_ids", &text_and_eos_ids)?;
 
         // ── Build codec token IDs (7 tokens) ──
         // [think, think_bos, language_id, think_eos, spk, pad, bos]
@@ -1082,48 +1177,56 @@ impl Qwen3TTSEngine {
         let codec_embeds = run_embed_batch(&mut self.codec_embed, "input_ids", &codec_ids)?;
         assert_eq!(codec_embeds.len(), 7 * h);
 
+        // Extract codec_pad and codec_bos embeddings for text positions
+        let codec_pad_embed = &codec_embeds[5 * h..6 * h];
+        let codec_bos_embed = &codec_embeds[6 * h..7 * h];
+
         // ── Construct final embedding ──
         let mut final_embeds = Vec::with_capacity(prefill_len * h);
 
-        // Prepend instruct embeddings (pure text, no codec addition)
+        // 1. Instruct embeddings (pure text, no codec)
         if let Some(ref ie) = instruct_embeds {
             final_embeds.extend_from_slice(ie);
         }
 
-        // Core positions: role(3) + mixed(6) + first_text+bos(1)
-        for pos in 0..core_len {
-            let text_src = &text_embeds[pos * h..(pos + 1) * h];
+        // 2. Role positions (3): pure text
+        for pos in 0..3 {
+            let src = &role_mixed_embeds[pos * h..(pos + 1) * h];
+            final_embeds.extend_from_slice(src);
+        }
 
-            if pos < 3 {
-                // Role positions: pure text embedding (no codec)
-                final_embeds.extend_from_slice(text_src);
-            } else if pos < 9 {
-                // Mixed positions (3..8): text + codec[pos-3]
-                let codec_idx = pos - 3;
-                let codec_src = &codec_embeds[codec_idx * h..(codec_idx + 1) * h];
-                for j in 0..h {
-                    final_embeds.push(text_src[j] + codec_src[j]);
-                }
-            } else {
-                // Position 9: first_text_token + codec_bos (codec index 6)
-                let codec_src = &codec_embeds[6 * h..7 * h];
-                for j in 0..h {
-                    final_embeds.push(text_src[j] + codec_src[j]);
-                }
+        // 3. Mixed positions (6): text + codec[0..5]
+        for pos in 0..6 {
+            let text_src = &role_mixed_embeds[(3 + pos) * h..(3 + pos + 1) * h];
+            let codec_src = &codec_embeds[pos * h..(pos + 1) * h];
+            for j in 0..h {
+                final_embeds.push(text_src[j] + codec_src[j]);
             }
+        }
+
+        // 4. ALL text tokens + codec_pad (T positions)
+        for t in 0..text_len {
+            let text_src = &text_and_eos_embeds[t * h..(t + 1) * h];
+            for j in 0..h {
+                final_embeds.push(text_src[j] + codec_pad_embed[j]);
+            }
+        }
+
+        // 5. tts_eos + codec_pad (1 position)
+        let tts_eos_src = &text_and_eos_embeds[text_len * h..(text_len + 1) * h];
+        for j in 0..h {
+            final_embeds.push(tts_eos_src[j] + codec_pad_embed[j]);
+        }
+
+        // 6. tts_pad + codec_bos (1 position)
+        for j in 0..h {
+            final_embeds.push(self.tts_pad_embed[j] + codec_bos_embed[j]);
         }
 
         assert_eq!(final_embeds.len(), prefill_len * h);
 
-        // ── Build trailing text hidden: text_tokens[1:] + tts_eos ──
-        let mut trailing_ids: Vec<i64> = Vec::with_capacity(text_len);
-        if text_len > 1 {
-            trailing_ids.extend_from_slice(&text_tokens[1..]);
-        }
-        trailing_ids.push(tts_eos);
-
-        let trailing_text_hidden =
-            run_embed_batch(&mut self.text_project, "input_ids", &trailing_ids)?;
+        // Non-streaming: trailing_text_hidden is just tts_pad_embed (constant for all decode steps)
+        let trailing_text_hidden = self.tts_pad_embed.clone();
 
         Ok((
             final_embeds,
@@ -1133,14 +1236,11 @@ impl Qwen3TTSEngine {
         ))
     }
 
-    /// Build prompt embeddings for VoiceDesign mode (no speaker token).
+    /// Build prompt embeddings for VoiceDesign mode (non-streaming, no speaker token, no language).
     ///
-    /// Layout: [instruct(N), role(3), mixed(5), first_text+bos(1)] = N + 9
+    /// VoiceDesign uses language=None, so codec = [nothink, think_bos, think_eos, pad, bos] (5 tokens).
     ///
-    /// The codec sequence has NO speaker token:
-    ///   codec_0 = [think, think_bos, lang, think_eos] (4 tokens)
-    ///   codec_1 = [pad, bos] (2 tokens)
-    ///   total = 6 codec tokens for 5 mixed positions + 1 bos position
+    /// Layout: [instruct(N), role(3), mixed(4), text_tokens+codec_pad, tts_eos+codec_pad, tts_pad+codec_bos]
     fn build_voice_design_embeddings(
         &mut self,
         text: &str,
@@ -1154,16 +1254,11 @@ impl Qwen3TTSEngine {
         let tts_pad = self.config.tts_pad;
         let tts_bos = self.config.tts_bos;
         let tts_eos = self.config.tts_eos;
-        let codec_think_id = self.config.codec_think_id;
+        let codec_nothink_id = self.config.codec_nothink_id;
         let codec_think_bos_id = self.config.codec_think_bos_id;
         let codec_think_eos_id = self.config.codec_think_eos_id;
         let codec_pad_id = self.config.codec_pad_id;
         let codec_bos_id = self.config.codec_bos_id;
-
-        // Detect language from text
-        let default_english = 2050;
-        let language_id = self.detect_language_from_text(text, default_english);
-        log::info!("VoiceDesign language ID: {}", language_id);
 
         // Tokenize the text
         let text_tokens = self.tokenizer.tokenize(text);
@@ -1176,82 +1271,92 @@ impl Qwen3TTSEngine {
         let instruct_embeds = self.build_instruct_embeddings(instruct)?;
         let instruct_positions = instruct_embeds.len() / h;
 
-        // Core: [role(3), mixed(5), first_text(1)] = 9
-        let core_len = 9;
-        let prefill_len = instruct_positions + core_len;
+        // Codec: 5 tokens (language=None → nothink, no language token)
+        // mixed_count = 5 - 1 = 4 (all codec except bos, which pairs with final tts_pad)
+        let mixed_count = 4;
+        let prefill_len = instruct_positions + 3 + mixed_count + text_len + 1 + 1;
 
-        // Text token IDs for core
+        // Role + mixed text tokens (3 + 4 = 7)
         let newline: i64 = 198;
-        let mut text_ids: Vec<i64> = Vec::with_capacity(core_len);
-        // Role prefix (3)
-        text_ids.push(im_start);
-        text_ids.push(assistant);
-        text_ids.push(newline);
-        // Mixed text side (5): tts_pad × 4 + tts_bos (no speaker = one fewer pad)
-        for _ in 0..4 {
-            text_ids.push(tts_pad);
+        let role_mixed_len = 3 + mixed_count;
+        let mut role_mixed_ids: Vec<i64> = Vec::with_capacity(role_mixed_len);
+        role_mixed_ids.push(im_start);
+        role_mixed_ids.push(assistant);
+        role_mixed_ids.push(newline);
+        for _ in 0..mixed_count - 1 {
+            role_mixed_ids.push(tts_pad);
         }
-        text_ids.push(tts_bos);
-        // First text token (1)
-        text_ids.push(text_tokens[0]);
+        role_mixed_ids.push(tts_bos);
 
-        assert_eq!(text_ids.len(), core_len);
+        let role_mixed_embeds =
+            run_embed_batch(&mut self.text_project, "input_ids", &role_mixed_ids)?;
 
-        let text_embeds = run_embed_batch(&mut self.text_project, "input_ids", &text_ids)?;
+        // ALL text tokens + tts_eos
+        let mut text_and_eos_ids: Vec<i64> = Vec::with_capacity(text_len + 1);
+        text_and_eos_ids.extend_from_slice(&text_tokens);
+        text_and_eos_ids.push(tts_eos);
+        let text_and_eos_embeds =
+            run_embed_batch(&mut self.text_project, "input_ids", &text_and_eos_ids)?;
 
-        // Codec tokens (6, no speaker):
-        // [think, think_bos, lang, think_eos, pad, bos]
+        // Codec tokens (5, language=None, no speaker):
+        // [nothink, think_bos, think_eos, pad, bos]
         let codec_ids = vec![
-            codec_think_id,
+            codec_nothink_id,
             codec_think_bos_id,
-            language_id,
             codec_think_eos_id,
             codec_pad_id,
             codec_bos_id,
         ];
         let codec_embeds = run_embed_batch(&mut self.codec_embed, "input_ids", &codec_ids)?;
-        assert_eq!(codec_embeds.len(), 6 * h);
+        assert_eq!(codec_embeds.len(), 5 * h);
+
+        let codec_pad_embed = &codec_embeds[3 * h..4 * h];
+        let codec_bos_embed = &codec_embeds[4 * h..5 * h];
 
         // Construct final embedding
         let mut final_embeds = Vec::with_capacity(prefill_len * h);
 
-        // Prepend instruct embeddings
+        // 1. Instruct (pure text)
         final_embeds.extend_from_slice(&instruct_embeds);
 
-        // Core positions: role(3) + mixed(5) + first_text+bos(1)
-        for pos in 0..core_len {
-            let text_src = &text_embeds[pos * h..(pos + 1) * h];
+        // 2. Role (3): pure text
+        for pos in 0..3 {
+            let src = &role_mixed_embeds[pos * h..(pos + 1) * h];
+            final_embeds.extend_from_slice(src);
+        }
 
-            if pos < 3 {
-                // Role: pure text
-                final_embeds.extend_from_slice(text_src);
-            } else if pos < 8 {
-                // Mixed (5 positions): text + codec[pos-3]
-                let codec_idx = pos - 3;
-                let codec_src = &codec_embeds[codec_idx * h..(codec_idx + 1) * h];
-                for j in 0..h {
-                    final_embeds.push(text_src[j] + codec_src[j]);
-                }
-            } else {
-                // Position 8: first_text + codec_bos (codec index 5)
-                let codec_src = &codec_embeds[5 * h..6 * h];
-                for j in 0..h {
-                    final_embeds.push(text_src[j] + codec_src[j]);
-                }
+        // 3. Mixed (4): text + codec[0..3]
+        for pos in 0..mixed_count {
+            let text_src = &role_mixed_embeds[(3 + pos) * h..(3 + pos + 1) * h];
+            let codec_src = &codec_embeds[pos * h..(pos + 1) * h];
+            for j in 0..h {
+                final_embeds.push(text_src[j] + codec_src[j]);
             }
+        }
+
+        // 4. ALL text tokens + codec_pad
+        for t in 0..text_len {
+            let text_src = &text_and_eos_embeds[t * h..(t + 1) * h];
+            for j in 0..h {
+                final_embeds.push(text_src[j] + codec_pad_embed[j]);
+            }
+        }
+
+        // 5. tts_eos + codec_pad
+        let tts_eos_src = &text_and_eos_embeds[text_len * h..(text_len + 1) * h];
+        for j in 0..h {
+            final_embeds.push(tts_eos_src[j] + codec_pad_embed[j]);
+        }
+
+        // 6. tts_pad + codec_bos
+        for j in 0..h {
+            final_embeds.push(self.tts_pad_embed[j] + codec_bos_embed[j]);
         }
 
         assert_eq!(final_embeds.len(), prefill_len * h);
 
-        // Trailing text hidden
-        let mut trailing_ids: Vec<i64> = Vec::with_capacity(text_len);
-        if text_len > 1 {
-            trailing_ids.extend_from_slice(&text_tokens[1..]);
-        }
-        trailing_ids.push(tts_eos);
-
-        let trailing_text_hidden =
-            run_embed_batch(&mut self.text_project, "input_ids", &trailing_ids)?;
+        // Non-streaming: trailing is constant tts_pad_embed
+        let trailing_text_hidden = self.tts_pad_embed.clone();
 
         Ok((
             final_embeds,
@@ -1263,12 +1368,14 @@ impl Qwen3TTSEngine {
 
     /// Build prompt embeddings for voice cloning (Base variant, x_vector_only mode).
     ///
-    /// Layout: [role(3), mixed(6), first_text+bos(1)] = 10
-    ///
-    /// The codec sequence has a speaker embedding instead of a speaker token ID:
-    ///   codec_0 = [think, think_bos, lang, think_eos] (4 codec tokens, embedded normally)
+    /// Clone uses language=None, so:
+    ///   codec_0 = [nothink, think_bos, think_eos] (3 tokens, NO language)
     ///   speaker_embed = [2048D speaker embedding] (1 position, injected directly)
-    ///   codec_1 = [pad, bos] (2 codec tokens, embedded normally)
+    ///   codec_1 = [pad, bos] (2 tokens)
+    ///   total = 6 codec positions (5 embedded + 1 speaker_embed)
+    ///
+    /// Non-streaming layout:
+    ///   [role(3), mixed(5), text_tokens+codec_pad, tts_eos+codec_pad, tts_pad+codec_bos]
     fn build_clone_embeddings(
         &mut self,
         text: &str,
@@ -1284,16 +1391,11 @@ impl Qwen3TTSEngine {
         let tts_pad = self.config.tts_pad;
         let tts_bos = self.config.tts_bos;
         let tts_eos = self.config.tts_eos;
-        let codec_think_id = self.config.codec_think_id;
+        let codec_nothink_id = self.config.codec_nothink_id;
         let codec_think_bos_id = self.config.codec_think_bos_id;
         let codec_think_eos_id = self.config.codec_think_eos_id;
         let codec_pad_id = self.config.codec_pad_id;
         let codec_bos_id = self.config.codec_bos_id;
-
-        // Detect language from text
-        let default_english = 2050;
-        let language_id = self.detect_language_from_text(text, default_english);
-        log::info!("Clone language ID: {}", language_id);
 
         // Tokenize the text
         let text_tokens = self.tokenizer.tokenize(text);
@@ -1302,85 +1404,101 @@ impl Qwen3TTSEngine {
             return Err("Cannot generate speech from empty text".into());
         }
 
-        // Prefill: [role(3), mixed(6), first_text(1)] = 10 (same as CustomVoice)
-        let prefill_len = 10;
+        // Codec: [nothink, think_bos, think_eos] + speaker + [pad, bos] = 6 positions
+        // mixed_count = 5 (all except bos which pairs with final tts_pad)
+        let mixed_count = 5;
+        let prefill_len = 3 + mixed_count + text_len + 1 + 1;
 
-        // Text token IDs
+        // Role + mixed text tokens (3 + 5 = 8)
         let newline: i64 = 198;
-        let mut text_ids: Vec<i64> = Vec::with_capacity(prefill_len);
-        // Role prefix (3)
-        text_ids.push(im_start);
-        text_ids.push(assistant);
-        text_ids.push(newline);
-        // Mixed text side (6): tts_pad × 5 + tts_bos
-        for _ in 0..5 {
-            text_ids.push(tts_pad);
+        let role_mixed_len = 3 + mixed_count;
+        let mut role_mixed_ids: Vec<i64> = Vec::with_capacity(role_mixed_len);
+        role_mixed_ids.push(im_start);
+        role_mixed_ids.push(assistant);
+        role_mixed_ids.push(newline);
+        for _ in 0..mixed_count - 1 {
+            role_mixed_ids.push(tts_pad);
         }
-        text_ids.push(tts_bos);
-        // First text token (1)
-        text_ids.push(text_tokens[0]);
+        role_mixed_ids.push(tts_bos);
 
-        let text_embeds = run_embed_batch(&mut self.text_project, "input_ids", &text_ids)?;
+        let role_mixed_embeds =
+            run_embed_batch(&mut self.text_project, "input_ids", &role_mixed_ids)?;
 
-        // Codec tokens — 6 embeddable tokens (speaker position uses direct embedding)
+        // ALL text tokens + tts_eos
+        let mut text_and_eos_ids: Vec<i64> = Vec::with_capacity(text_len + 1);
+        text_and_eos_ids.extend_from_slice(&text_tokens);
+        text_and_eos_ids.push(tts_eos);
+        let text_and_eos_embeds =
+            run_embed_batch(&mut self.text_project, "input_ids", &text_and_eos_ids)?;
+
+        // Codec tokens — 5 embeddable (speaker position uses direct embedding)
+        // [nothink, think_bos, think_eos, pad, bos]
         let codec_ids = vec![
-            codec_think_id,
+            codec_nothink_id,
             codec_think_bos_id,
-            language_id,
             codec_think_eos_id,
             codec_pad_id,
             codec_bos_id,
         ];
         let codec_embeds = run_embed_batch(&mut self.codec_embed, "input_ids", &codec_ids)?;
 
+        let codec_pad_embed = &codec_embeds[3 * h..4 * h];
+        let codec_bos_embed = &codec_embeds[4 * h..5 * h];
+
         // Construct final embedding
         let mut final_embeds = Vec::with_capacity(prefill_len * h);
 
-        for pos in 0..prefill_len {
-            let text_src = &text_embeds[pos * h..(pos + 1) * h];
+        // 1. Role (3): pure text
+        for pos in 0..3 {
+            let src = &role_mixed_embeds[pos * h..(pos + 1) * h];
+            final_embeds.extend_from_slice(src);
+        }
 
-            if pos < 3 {
-                // Role: pure text
-                final_embeds.extend_from_slice(text_src);
-            } else if pos == 7 {
-                // Position 7 (mixed index 4): speaker embedding instead of codec token
+        // 2. Mixed (5): text + codec, with speaker_embed at position 3
+        //   pos 0 -> codec[0] (nothink)
+        //   pos 1 -> codec[1] (think_bos)
+        //   pos 2 -> codec[2] (think_eos)
+        //   pos 3 -> speaker_embed (direct injection)
+        //   pos 4 -> codec[3] (pad)
+        for pos in 0..mixed_count {
+            let text_src = &role_mixed_embeds[(3 + pos) * h..(3 + pos + 1) * h];
+            if pos == 3 {
+                // Speaker embedding position
                 for j in 0..h {
                     final_embeds.push(text_src[j] + speaker_embed[j]);
                 }
-            } else if pos < 9 {
-                // Mixed positions: text + codec
-                // Codec index mapping:
-                //   pos 3 -> codec[0] (think)
-                //   pos 4 -> codec[1] (think_bos)
-                //   pos 5 -> codec[2] (lang)
-                //   pos 6 -> codec[3] (think_eos)
-                //   pos 7 -> speaker_embed (handled above)
-                //   pos 8 -> codec[4] (pad)
-                let codec_idx = if pos < 7 { pos - 3 } else { pos - 4 }; // skip speaker position
-                let codec_src = &codec_embeds[codec_idx * h..(codec_idx + 1) * h];
-                for j in 0..h {
-                    final_embeds.push(text_src[j] + codec_src[j]);
-                }
             } else {
-                // Position 9: first_text + codec_bos (codec index 5)
-                let codec_src = &codec_embeds[5 * h..6 * h];
+                let codec_idx = if pos < 3 { pos } else { pos - 1 };
+                let codec_src = &codec_embeds[codec_idx * h..(codec_idx + 1) * h];
                 for j in 0..h {
                     final_embeds.push(text_src[j] + codec_src[j]);
                 }
             }
         }
 
+        // 3. ALL text tokens + codec_pad
+        for t in 0..text_len {
+            let text_src = &text_and_eos_embeds[t * h..(t + 1) * h];
+            for j in 0..h {
+                final_embeds.push(text_src[j] + codec_pad_embed[j]);
+            }
+        }
+
+        // 4. tts_eos + codec_pad
+        let tts_eos_src = &text_and_eos_embeds[text_len * h..(text_len + 1) * h];
+        for j in 0..h {
+            final_embeds.push(tts_eos_src[j] + codec_pad_embed[j]);
+        }
+
+        // 5. tts_pad + codec_bos
+        for j in 0..h {
+            final_embeds.push(self.tts_pad_embed[j] + codec_bos_embed[j]);
+        }
+
         assert_eq!(final_embeds.len(), prefill_len * h);
 
-        // Trailing text hidden
-        let mut trailing_ids: Vec<i64> = Vec::with_capacity(text_len);
-        if text_len > 1 {
-            trailing_ids.extend_from_slice(&text_tokens[1..]);
-        }
-        trailing_ids.push(tts_eos);
-
-        let trailing_text_hidden =
-            run_embed_batch(&mut self.text_project, "input_ids", &trailing_ids)?;
+        // Non-streaming: trailing is constant tts_pad_embed
+        let trailing_text_hidden = self.tts_pad_embed.clone();
 
         Ok((
             final_embeds,
@@ -1519,7 +1637,20 @@ impl Qwen3TTSEngine {
 
         let mut generated_codes: Vec<i64> = Vec::new();
 
+        let timeout = std::time::Duration::from_secs(GENERATION_TIMEOUT_SECS);
+
         for step in 0..max_steps {
+            // Wall-clock timeout check
+            if start.elapsed() >= timeout {
+                log::warn!(
+                    "Decode loop timed out after {}s at step {} — returning {} partial frames",
+                    GENERATION_TIMEOUT_SECS,
+                    step,
+                    frames.len()
+                );
+                break;
+            }
+
             // 1. Sample first_code with repetition penalty + token suppression
             apply_repetition_penalty(
                 &mut cur_logits,
@@ -1527,10 +1658,17 @@ impl Qwen3TTSEngine {
                 self.gen_config.repetition_penalty,
             );
 
+            // Token suppression: mask [2048, 3072) except EOS
             for i in 2048..3072 {
                 if i as i64 != cfg.codec_eos_token_id {
                     cur_logits[i] = f32::NEG_INFINITY;
                 }
+            }
+
+            // min_new_tokens=2: suppress EOS during the first 2 steps
+            // (matches HF generate's MinNewTokensLengthLogitsProcessor)
+            if step < 2 {
+                cur_logits[cfg.codec_eos_token_id as usize] = f32::NEG_INFINITY;
             }
 
             let first_code = sample_top_k(
@@ -1542,8 +1680,8 @@ impl Qwen3TTSEngine {
 
             generated_codes.push(first_code);
 
-            // 2. EOS check (after at least 2 steps)
-            if first_code == cfg.codec_eos_token_id && step > 1 {
+            // 2. EOS check
+            if first_code == cfg.codec_eos_token_id {
                 log::info!("EOS at step {}", step);
                 break;
             }
@@ -1706,20 +1844,24 @@ impl Qwen3TTSEngine {
             }
         }
 
-        let elapsed = start.elapsed().as_millis();
+        let elapsed = start.elapsed();
+        let elapsed_ms = elapsed.as_millis();
         let audio_sec = frames.len() as f64 / CODEC_FPS;
         let hit_limit = frames.len() >= max_steps;
+        let hit_timeout = elapsed >= timeout;
         log::info!(
             "Decode done: {} frames (~{:.1}s audio) in {} ms ({:.2}x real-time){}",
             frames.len(),
             audio_sec,
-            elapsed,
-            if elapsed > 0 {
-                audio_sec / (elapsed as f64 / 1000.0)
+            elapsed_ms,
+            if elapsed_ms > 0 {
+                audio_sec / (elapsed_ms as f64 / 1000.0)
             } else {
                 0.0
             },
-            if hit_limit {
+            if hit_timeout {
+                " [TIMED OUT -- audio may be truncated]"
+            } else if hit_limit {
                 " [HIT MAX STEPS -- audio may be truncated]"
             } else {
                 ""
@@ -1829,6 +1971,22 @@ fn run_code_predictor_embed(
 }
 
 // ── Utilities ───────────────────────────────────────────────────
+
+/// Read available system memory in MB from /proc/meminfo (Linux only).
+/// Returns `None` on non-Linux platforms or if the file can't be read.
+fn available_memory_mb() -> Option<u64> {
+    let data = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in data.lines() {
+        if line.starts_with("MemAvailable:") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let kb: u64 = parts[1].parse().ok()?;
+                return Some(kb / 1024);
+            }
+        }
+    }
+    None
+}
 
 fn load_session(path: &std::path::Path, name: &str) -> Result<Session, String> {
     if !path.exists() {
