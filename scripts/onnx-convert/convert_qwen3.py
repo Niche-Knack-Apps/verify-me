@@ -177,10 +177,20 @@ class CodePredictorEmbedModule(nn.Module):
 
 
 class CodePredictorPrefillModule(nn.Module):
-    """Code predictor prefill: inputs_embeds → logits + KV cache.
+    """Code predictor forward: inputs_embeds + position_ids + attention_mask → logits.
 
-    Input:  inputs_embeds [batch, 2, talker_hidden] (talker_hidden + codec_embed)
-    Output: all_logits [batch, 2, 15 * vocab], past_key_values [layers, 2, batch, heads, 2, dim]
+    Used in repeated-prefill mode: run for each autoregressive step with a
+    growing input sequence. No KV cache needed since the code predictor is
+    tiny (5 layers, max 16 tokens).
+
+    Explicit position_ids and 4D attention_mask bypass all internal shape
+    computations (causal mask creation, position derivation) that produce
+    hardcoded Reshape/Expand ops in TorchScript tracing.
+
+    Input:  inputs_embeds [batch, seq_len, talker_hidden],
+            position_ids [batch, seq_len],
+            attention_mask [batch, 1, seq_len, seq_len] (4D causal mask: 0=attend, -inf=mask)
+    Output: all_logits [batch, seq_len, 15 * vocab]
     """
 
     def __init__(self, code_predictor, num_layers):
@@ -190,22 +200,19 @@ class CodePredictorPrefillModule(nn.Module):
         self.small_to_mtp_projection = code_predictor.small_to_mtp_projection
         self.num_layers = num_layers
 
-    def forward(self, inputs_embeds: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, inputs_embeds: torch.Tensor, position_ids: torch.Tensor,
+                attention_mask: torch.Tensor) -> torch.Tensor:
         projected = self.small_to_mtp_projection(inputs_embeds)
         outputs = self.model(
             inputs_embeds=projected,
-            use_cache=True,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            use_cache=False,
             output_hidden_states=False,
         )
         hidden = outputs.last_hidden_state
         all_logits = torch.cat([head(hidden) for head in self.lm_heads], dim=-1)
-
-        past_kv = outputs.past_key_values
-        if hasattr(past_kv, 'to_legacy_cache'):
-            past_kv = past_kv.to_legacy_cache()
-        kv_flat = torch.stack([torch.stack([k, v]) for k, v in past_kv])
-
-        return all_logits, kv_flat
+        return all_logits
 
 
 class CodePredictorDecodeModule(nn.Module):
@@ -325,6 +332,82 @@ def export_onnx(
 
     size_mb = output_path.stat().st_size / (1024 * 1024)
     logger.info("  OK: %s (%.1f MB)", output_path.name, size_mb)
+
+
+def fix_hardcoded_reshape(onnx_path: Path, traced_seq_len: int) -> int:
+    """Fix hardcoded Reshape shapes caused by TorchScript tracing.
+
+    When torch.onnx.export traces a model with a concrete seq_len,
+    operations like `arange(seq_len).view(-1, 1)` produce Reshape nodes
+    with constant target shapes (e.g., [2, 1] for seq_len=2). These
+    fail at runtime when seq_len differs.
+
+    This function finds such patterns (Range → Reshape with [traced_len, 1])
+    and replaces the target shape with [-1, 1] so the first dimension is
+    inferred dynamically.
+
+    Returns the number of Reshape nodes fixed.
+    """
+    model = onnx.load(str(onnx_path))
+    fixed = 0
+
+    # Build maps for both initializers and Constant nodes
+    init_map = {init.name: init for init in model.graph.initializer}
+    const_nodes = {}
+    for node in model.graph.node:
+        if node.op_type == "Constant":
+            for out in node.output:
+                const_nodes[out] = node
+
+    # Find Range → Reshape patterns with hardcoded shapes
+    range_outputs = set()
+    for node in model.graph.node:
+        if node.op_type == "Range":
+            range_outputs.update(node.output)
+
+    for node in model.graph.node:
+        if node.op_type != "Reshape" or len(node.input) < 2:
+            continue
+        data_input, shape_input = node.input[0], node.input[1]
+
+        # Only fix Reshape nodes that consume Range output
+        if data_input not in range_outputs:
+            continue
+
+        # Try initializer first
+        if shape_input in init_map:
+            init = init_map[shape_input]
+            shape_val = np.frombuffer(init.raw_data, dtype=np.int64).copy()
+
+            if len(shape_val) == 2 and shape_val[0] == traced_seq_len and shape_val[1] == 1:
+                logger.info(
+                    "  Fix Reshape %s (initializer): [%d, 1] → [-1, 1]",
+                    node.name, traced_seq_len,
+                )
+                shape_val[0] = -1
+                init.raw_data = shape_val.tobytes()
+                fixed += 1
+
+        # Try Constant node
+        elif shape_input in const_nodes:
+            const_node = const_nodes[shape_input]
+            for attr in const_node.attribute:
+                if attr.name == "value":
+                    shape_val = np.frombuffer(attr.t.raw_data, dtype=np.int64).copy()
+                    if len(shape_val) == 2 and shape_val[0] == traced_seq_len and shape_val[1] == 1:
+                        logger.info(
+                            "  Fix Reshape %s (Constant): [%d, 1] → [-1, 1]",
+                            node.name, traced_seq_len,
+                        )
+                        shape_val[0] = -1
+                        attr.t.raw_data = shape_val.tobytes()
+                        fixed += 1
+                    break
+
+    if fixed > 0:
+        onnx.save(model, str(onnx_path))
+
+    return fixed
 
 
 def quantize_model(input_path: Path, output_path: Path) -> None:
@@ -614,20 +697,35 @@ def convert_variant(
     cp_prefill = CodePredictorPrefillModule(talker.code_predictor, CODE_PRED_LAYERS)
     cp_prefill.eval()
 
-    dummy_pred_input = torch.randn(1, 2, TALKER_HIDDEN)
+    cp_prefill_seq = 2
+    dummy_pred_input = torch.randn(1, cp_prefill_seq, TALKER_HIDDEN)
+    dummy_pred_pos = torch.arange(cp_prefill_seq, dtype=torch.int64).unsqueeze(0)
+    # 4D causal mask: [batch, 1, seq_len, seq_len], 0.0=attend, -inf=mask
+    min_dtype = torch.finfo(torch.float32).min
+    dummy_attn_mask = torch.full((1, 1, cp_prefill_seq, cp_prefill_seq), 0.0)
+    dummy_attn_mask += torch.triu(
+        torch.full((cp_prefill_seq, cp_prefill_seq), min_dtype), diagonal=1
+    ).unsqueeze(0).unsqueeze(0)
+    cp_prefill_path = output_dir / "code_predictor_prefill.onnx"
     export_onnx(
         cp_prefill,
-        (dummy_pred_input,),
-        output_dir / "code_predictor_prefill.onnx",
-        input_names=["inputs_embeds"],
-        output_names=["all_logits", "past_key_values"],
+        (dummy_pred_input, dummy_pred_pos, dummy_attn_mask),
+        cp_prefill_path,
+        input_names=["inputs_embeds", "position_ids", "attention_mask"],
+        output_names=["all_logits"],
         dynamic_axes={
             "inputs_embeds": {0: "batch", 1: "seq_len"},
+            "position_ids": {0: "batch", 1: "seq_len"},
+            "attention_mask": {2: "q_len", 3: "kv_len"},
             "all_logits": {0: "batch", 1: "seq_len"},
-            "past_key_values": {4: "seq_len"},
         },
         skip_existing=_skip,
     )
+    # Fix any remaining hardcoded Reshape shapes from tracing
+    if cp_prefill_path.exists():
+        n = fix_hardcoded_reshape(cp_prefill_path, cp_prefill_seq)
+        if n:
+            logger.info("  Fixed %d hardcoded Reshape node(s)", n)
 
     # ---- 5b. code_predictor_decode.onnx ----
     # Autoregressive code predictor: single-step decode with KV cache

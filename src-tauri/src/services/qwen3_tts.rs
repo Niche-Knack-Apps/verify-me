@@ -876,15 +876,39 @@ impl Qwen3TTSEngine {
             let mut cp_seq_len: i64 = 2;
 
             for group in 0..15i64 {
-                // Run full prefill with current sequence
+                // Run full prefill with explicit position_ids + 4D causal mask
+                let seq = cp_seq_len as usize;
+
                 let cp_tensor = Tensor::from_array(
                     (vec![1i64, cp_seq_len, h as i64], cp_embeds.clone()),
                 )
                 .map_err(|e| format!("CP prefill tensor: {}", e))?;
 
+                let cp_pos: Vec<i64> = (0..cp_seq_len).collect();
+                let cp_pos_tensor = Tensor::from_array(
+                    (vec![1i64, cp_seq_len], cp_pos),
+                )
+                .map_err(|e| format!("CP pos tensor: {}", e))?;
+
+                // 4D causal mask: [1, 1, seq, seq], 0.0=attend, -inf=mask
+                let mut mask = vec![0.0f32; seq * seq];
+                for i in 0..seq {
+                    for j in (i + 1)..seq {
+                        mask[i * seq + j] = f32::NEG_INFINITY;
+                    }
+                }
+                let mask_tensor = Tensor::from_array(
+                    (vec![1i64, 1, cp_seq_len, cp_seq_len], mask),
+                )
+                .map_err(|e| format!("CP mask tensor: {}", e))?;
+
                 let cp_outputs = self
                     .code_predictor_prefill
-                    .run(ort::inputs!["inputs_embeds" => cp_tensor])
+                    .run(ort::inputs![
+                        "inputs_embeds" => cp_tensor,
+                        "position_ids" => cp_pos_tensor,
+                        "attention_mask" => mask_tensor
+                    ])
                     .map_err(|e| format!("CP error at step {}, group {}: {}", step, group, e))?;
 
                 // all_logits: [1, seq_len, 15 * cv]
