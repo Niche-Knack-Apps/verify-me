@@ -2282,20 +2282,11 @@ fn resample_to_24k(samples: &[f32], src_rate: u32) -> Vec<f32> {
 
 // ── Mel Spectrogram Extraction ──────────────────────────────────
 
-/// Extract log mel spectrogram from audio samples.
-///
-/// Parameters matching the ECAPA-TDNN speaker encoder:
-///   - sample_rate: 24000
-///   - n_fft: 1024
-///   - hop_length: 256
-///   - n_mels: 128
-///   - fmin: 0, fmax: sample_rate/2
-///
-/// Returns flat [T, 128] mel spectrogram.
 /// Extract log-magnitude mel spectrogram matching Python's mel_spectrogram() exactly.
 ///
-/// Python pipeline: reflect pad → STFT → magnitude (sqrt) → mel filterbank (slaney norm) → log
+/// Python pipeline: reflect pad → STFT → magnitude (sqrt) → mel filterbank (slaney) → log
 /// Parameters: n_fft=1024, hop=256, n_mels=128, fmin=0, fmax=12000, sr=24000
+/// Returns flat [T, 128] mel spectrogram.
 fn extract_mel(samples: &[f32], sample_rate: u32) -> Vec<f32> {
     use rustfft::num_complex::Complex;
     use rustfft::FftPlanner;
@@ -2391,7 +2382,8 @@ fn extract_mel(samples: &[f32], sample_rate: u32) -> Vec<f32> {
 }
 
 /// Build a mel filterbank matrix [n_mels, freq_bins] with slaney normalization.
-/// Matches librosa.filters.mel(norm='slaney') — the default in librosa >= 0.8.
+/// Uses the **Slaney mel scale** (librosa default, htk=False): linear below 1000 Hz,
+/// logarithmic above. Matches `librosa.filters.mel(norm='slaney', htk=False)`.
 fn build_mel_filterbank(
     n_mels: usize,
     freq_bins: usize,
@@ -2399,8 +2391,27 @@ fn build_mel_filterbank(
     fmin: f64,
     fmax: f64,
 ) -> Vec<f64> {
-    let hz_to_mel = |hz: f64| -> f64 { 2595.0 * (1.0 + hz / 700.0).log10() };
-    let mel_to_hz = |mel: f64| -> f64 { 700.0 * (10.0_f64.powf(mel / 2595.0) - 1.0) };
+    // Slaney mel scale (librosa default, htk=False)
+    // Linear below 1000 Hz, logarithmic above.
+    let f_sp: f64 = 200.0 / 3.0;
+    let min_log_hz: f64 = 1000.0;
+    let min_log_mel: f64 = min_log_hz / f_sp; // 15.0
+    let logstep: f64 = (6.4_f64).ln() / 27.0; // ln(6400/1000) / 27
+
+    let hz_to_mel = |hz: f64| -> f64 {
+        if hz < min_log_hz {
+            hz / f_sp
+        } else {
+            min_log_mel + (hz / min_log_hz).ln() / logstep
+        }
+    };
+    let mel_to_hz = |mel: f64| -> f64 {
+        if mel < min_log_mel {
+            mel * f_sp
+        } else {
+            min_log_hz * (logstep * (mel - min_log_mel)).exp()
+        }
+    };
 
     let mel_min = hz_to_mel(fmin);
     let mel_max = hz_to_mel(fmax);
