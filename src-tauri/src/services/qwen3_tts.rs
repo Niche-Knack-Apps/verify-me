@@ -21,6 +21,11 @@ const MAX_REF_SECONDS: f32 = 15.0;
 const GENERATION_TIMEOUT_SECS: u64 = 120;
 /// Minimum available system memory (MB) required before loading a variant.
 const MIN_AVAILABLE_MEMORY_MB: u64 = 1500;
+/// Lower temperature for instruct mode to preserve voice conditioning signal.
+/// With the default 0.9, stochastic sampling can degrade instruct effects
+/// (e.g. "whisper" becomes faint rather than pronounced). 0.7 provides a
+/// good balance between naturalness and instruction fidelity.
+const INSTRUCT_TEMPERATURE: f32 = 0.7;
 
 /// Estimate a reasonable max decode steps based on text length.
 ///
@@ -609,6 +614,7 @@ impl Qwen3TTSEngine {
             checkpoint_tx,
             "custom_voice",
             total_start,
+            instruct_opt.is_some(),
         )
     }
 
@@ -680,7 +686,7 @@ impl Qwen3TTSEngine {
             }));
         }
 
-        // 2-6. Shared inference pipeline
+        // 2-6. Shared inference pipeline (VoiceDesign always uses instruct)
         self.run_inference_pipeline(
             text,
             &embeddings,
@@ -691,6 +697,7 @@ impl Qwen3TTSEngine {
             checkpoint_tx,
             "voice_design",
             total_start,
+            true,
         )
     }
 
@@ -772,7 +779,7 @@ impl Qwen3TTSEngine {
             t.elapsed().as_millis()
         );
 
-        // 4-6. Shared inference pipeline
+        // 4-6. Shared inference pipeline (voice clone has no instruct)
         self.run_inference_pipeline(
             text,
             &embeddings,
@@ -783,6 +790,7 @@ impl Qwen3TTSEngine {
             None,
             "voice_clone",
             total_start,
+            false,
         )
     }
 
@@ -798,6 +806,7 @@ impl Qwen3TTSEngine {
         checkpoint_tx: Option<&std::sync::mpsc::Sender<serde_json::Value>>,
         mode: &str,
         total_start: std::time::Instant,
+        has_instruct: bool,
     ) -> Result<(), String> {
         // 2. Prefill
         let t = std::time::Instant::now();
@@ -857,6 +866,7 @@ impl Qwen3TTSEngine {
             kv_seq_len,
             max_steps,
             trailing_text_hidden,
+            has_instruct,
         )?;
         let elapsed_ms = t.elapsed().as_millis();
         log::info!(
@@ -1616,6 +1626,7 @@ impl Qwen3TTSEngine {
         initial_kv_len: usize,
         max_steps: usize,
         trailing_text_hidden: &[f32],
+        has_instruct: bool,
     ) -> Result<Vec<[i64; 16]>, String> {
         let h = self.config.hidden_size;
         let cfg = &self.config;
@@ -1636,6 +1647,18 @@ impl Qwen3TTSEngine {
         let mut rng = rand::thread_rng();
 
         let mut generated_codes: Vec<i64> = Vec::new();
+
+        // Use lower temperature for instruct mode to better preserve voice conditioning
+        let talker_temperature = if has_instruct {
+            log::info!(
+                "Instruct mode: using temperature {:.2} (default {:.2})",
+                INSTRUCT_TEMPERATURE,
+                self.gen_config.temperature,
+            );
+            INSTRUCT_TEMPERATURE
+        } else {
+            self.gen_config.temperature
+        };
 
         let timeout = std::time::Duration::from_secs(GENERATION_TIMEOUT_SECS);
 
@@ -1673,7 +1696,7 @@ impl Qwen3TTSEngine {
 
             let first_code = sample_top_k(
                 &cur_logits,
-                self.gen_config.temperature,
+                talker_temperature,
                 self.gen_config.top_k,
                 &mut rng,
             ) as i64;
