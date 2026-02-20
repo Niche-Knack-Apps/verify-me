@@ -262,6 +262,19 @@ impl HfTokenizer {
             }
         }
     }
+
+    /// Tokenize text with special token handling (e.g. `<|im_start|>`, `<|im_end|>`).
+    /// This calls encode with `add_special_tokens=true` so that tokens like
+    /// `<|im_start|>` in the input string are resolved to their special IDs.
+    pub fn tokenize_with_special_tokens(&self, text: &str) -> Vec<i64> {
+        match self.inner.encode(text, true) {
+            Ok(encoding) => encoding.get_ids().iter().map(|&id| id as i64).collect(),
+            Err(e) => {
+                log::error!("Tokenization (with special tokens) failed: {}", e);
+                Vec::new()
+            }
+        }
+    }
 }
 
 // ── BPE Tokenizer (for Qwen3 TTS — legacy fallback) ────────────

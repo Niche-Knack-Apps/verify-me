@@ -121,6 +121,7 @@ impl OnnxEngine {
             Some(ActiveEngine::Qwen3TTS(engine)) => {
                 engine.generate_speech_with_checkpoints(
                     text, voice, speed, output_path, checkpoint_tx,
+                    voice_prompt, voice_mode, voice_description,
                 )
             }
             #[cfg(debug_assertions)]
@@ -146,6 +147,7 @@ impl OnnxEngine {
         &mut self,
         text: &str,
         reference_audio: &Path,
+        speed: f32,
         output_path: &Path,
     ) -> Result<(), String> {
         match self.engine.as_mut() {
@@ -153,7 +155,7 @@ impl OnnxEngine {
                 engine.clone_voice(text, reference_audio, output_path)
             }
             Some(ActiveEngine::Qwen3TTS(engine)) => {
-                engine.clone_voice(text, reference_audio, output_path)
+                engine.clone_voice(text, reference_audio, speed, output_path)
             }
             #[cfg(debug_assertions)]
             Some(ActiveEngine::Qwen3Safetensors(engine)) => {
