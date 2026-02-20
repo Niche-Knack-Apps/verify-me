@@ -192,7 +192,6 @@ pub struct Qwen3TTSEngine {
     text_project: Session,
     codec_embed: Session,
     code_predictor_prefill: Session,
-    code_predictor_decode: Session,
     code_predictor_embed: Session,
     talker_prefill: Session,
     talker_decode: Session,
@@ -234,10 +233,6 @@ impl Qwen3TTSEngine {
         let code_predictor_prefill = load_session(
             &model_dir.join("code_predictor_prefill.onnx"),
             "code_predictor_prefill",
-        )?;
-        let code_predictor_decode = load_session(
-            &model_dir.join("code_predictor_decode.onnx"),
-            "code_predictor_decode",
         )?;
         let code_predictor_embed = load_session(
             &model_dir.join("code_predictor_embed.onnx"),
@@ -293,7 +288,6 @@ impl Qwen3TTSEngine {
             text_project,
             codec_embed,
             code_predictor_prefill,
-            code_predictor_decode,
             code_predictor_embed,
             talker_prefill,
             talker_decode,
@@ -825,13 +819,6 @@ impl Qwen3TTSEngine {
         let kv_output_name = self.talker_decode.outputs().get(2)
             .map(|o| o.name().to_string())
             .ok_or_else(|| "talker_decode: no output at index 2 for KV cache".to_string())?;
-        let cp_prefill_kv_name = self.code_predictor_prefill.outputs().get(1)
-            .map(|o| o.name().to_string())
-            .ok_or_else(|| "CP prefill: no output at index 1 for KV cache".to_string())?;
-        let cp_decode_kv_name = self.code_predictor_decode.outputs().get(1)
-            .map(|o| o.name().to_string())
-            .ok_or_else(|| "CP decode: no output at index 1 for KV cache".to_string())?;
-
         let start = std::time::Instant::now();
         let mut rng = rand::thread_rng();
 
@@ -875,95 +862,59 @@ impl Qwen3TTSEngine {
             let first_code_embed =
                 run_embed_single(&mut self.codec_embed, "input_ids", first_code)?;
 
-            // 4. Autoregressive code_predictor: predict 15 codes with KV cache
-            //    Prefill: [talker_hidden, codec_embed(first_code)] -> logits + KV cache
-            //    Decode:  code_predictor_embed(group, code) -> logits + updated KV cache
+            // 4. Autoregressive code_predictor: predict 15 codes
+            //    Uses repeated prefill (no KV cache) since the code predictor
+            //    processes only 2-16 tokens through 5 layers — negligible cost.
+            //    This avoids the DynamicCache Expand-shape issue in ONNX tracing.
             let cv = cfg.codec_vocab_size;
             let mut predicted_codes = [0i64; 15];
 
-            // 4a. Code predictor prefill: [hidden, first_code_embed] -> logits + KV cache
-            let mut cp_input = vec![0.0f32; 2 * h];
-            cp_input[..h].copy_from_slice(&cur_hidden);
-            cp_input[h..].copy_from_slice(&first_code_embed);
+            // Build input sequence: starts with [hidden, first_code_embed]
+            let mut cp_embeds: Vec<f32> = Vec::with_capacity(17 * h);
+            cp_embeds.extend_from_slice(&cur_hidden);
+            cp_embeds.extend_from_slice(&first_code_embed);
+            let mut cp_seq_len: i64 = 2;
 
-            let cp_tensor =
-                Tensor::from_array((vec![1i64, 2, h as i64], cp_input))
-                    .map_err(|e| format!("CP prefill tensor: {}", e))?;
+            for group in 0..15i64 {
+                // Run full prefill with current sequence
+                let cp_tensor = Tensor::from_array(
+                    (vec![1i64, cp_seq_len, h as i64], cp_embeds.clone()),
+                )
+                .map_err(|e| format!("CP prefill tensor: {}", e))?;
 
-            let mut cp_outputs = self
-                .code_predictor_prefill
-                .run(ort::inputs!["inputs_embeds" => cp_tensor])
-                .map_err(|e| format!("CP prefill error at step {}: {}", step, e))?;
+                let cp_outputs = self
+                    .code_predictor_prefill
+                    .run(ort::inputs!["inputs_embeds" => cp_tensor])
+                    .map_err(|e| format!("CP error at step {}, group {}: {}", step, group, e))?;
 
-            // all_logits: [1, 2, 15 * cv] — take position 1, head 0
-            {
-                let (_shape, cp_logits_data) = cp_outputs[0]
+                // all_logits: [1, seq_len, 15 * cv]
+                // Take last position, head [group]
+                let (_shape, logits_data) = cp_outputs[0]
                     .try_extract_tensor::<f32>()
-                    .map_err(|e| format!("CP prefill logits: {}", e))?;
+                    .map_err(|e| format!("CP logits: {}", e))?;
 
-                let pos1_offset = 15 * cv; // skip position 0
-                let head0_logits = &cp_logits_data[pos1_offset..pos1_offset + cv];
-                predicted_codes[0] = sample_top_k(
-                    head0_logits,
+                let last_pos_offset = (cp_seq_len as usize - 1) * 15 * cv;
+                let head_offset = group as usize * cv;
+                let head_logits =
+                    &logits_data[last_pos_offset + head_offset..last_pos_offset + head_offset + cv];
+
+                predicted_codes[group as usize] = sample_top_k(
+                    head_logits,
                     self.gen_config.subtalker_temperature,
                     self.gen_config.subtalker_top_k,
                     &mut rng,
                 ) as i64;
-            }
 
-            // Extract KV cache as owned DynValue
-            let mut cp_kv: DynValue = cp_outputs
-                .remove(&cp_prefill_kv_name)
-                .ok_or("CP prefill: failed to extract KV cache")?;
-            let mut cp_kv_len: i64 = 2; // prefill had 2 positions
-
-            // 4b. Code predictor decode: 14 autoregressive steps
-
-            for group in 1..15i64 {
-                // Embed previous code with per-group embedding
-                let prev_embed = run_code_predictor_embed(
-                    &mut self.code_predictor_embed,
-                    group - 1,
-                    predicted_codes[(group - 1) as usize],
-                )?;
-
-                let embed_tensor =
-                    Tensor::from_array((vec![1i64, 1, h as i64], prev_embed))
-                        .map_err(|e| format!("CP decode embed tensor: {}", e))?;
-
-                let pos_tensor =
-                    Tensor::from_array((vec![1i64, 1], vec![cp_kv_len]))
-                        .map_err(|e| format!("CP decode pos tensor: {}", e))?;
-
-                let mut cp_dec_outputs = self
-                    .code_predictor_decode
-                    .run(ort::inputs![
-                        "inputs_embeds" => embed_tensor,
-                        "position_ids" => pos_tensor,
-                        "past_key_values" => cp_kv
-                    ])
-                    .map_err(|e| format!("CP decode error at step {}, group {}: {}", step, group, e))?;
-
-                {
-                    let (_shape, dec_logits) = cp_dec_outputs[0]
-                        .try_extract_tensor::<f32>()
-                        .map_err(|e| format!("CP decode logits: {}", e))?;
-
-                    // Pick head [group] logits from position 0
-                    let head_start = group as usize * cv;
-                    let head_logits = &dec_logits[head_start..head_start + cv];
-                    predicted_codes[group as usize] = sample_top_k(
-                        head_logits,
-                        self.gen_config.subtalker_temperature,
-                        self.gen_config.subtalker_top_k,
-                        &mut rng,
-                    ) as i64;
+                // Embed predicted code and append to sequence for next iteration
+                if group < 14 {
+                    let code_embed = run_code_predictor_embed(
+                        &mut self.code_predictor_embed,
+                        group,
+                        predicted_codes[group as usize],
+                    )?;
+                    cp_embeds.extend_from_slice(&code_embed);
+                    cp_seq_len += 1;
                 }
-
-                cp_kv = cp_dec_outputs
-                    .remove(&cp_decode_kv_name)
-                    .ok_or("CP decode: failed to extract KV cache")?;
-                cp_kv_len += 1;
             }
 
             // 5. Embed all 16 codes: codec_embed(first_code) + sum(code_predictor_embed(group, code))
