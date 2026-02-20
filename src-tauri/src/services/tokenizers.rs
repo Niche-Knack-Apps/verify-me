@@ -197,7 +197,74 @@ fn read_varint(data: &[u8], mut offset: usize) -> Option<(u64, usize)> {
     None
 }
 
-// ── BPE Tokenizer (for Qwen3 TTS) ──────────────────────────────
+// ── HuggingFace Tokenizer (for Qwen3 TTS) ───────────────────────
+//
+// Uses the `tokenizers` crate (HuggingFace's official Rust implementation)
+// to get exact tokenization parity with the Python pipeline.
+// Loads tokenizer.json if available, else builds from vocab.json + merges.txt
+// with ByteLevel pre-tokenization (matching the Python ONNX trace).
+
+pub struct HfTokenizer {
+    inner: tokenizers::Tokenizer,
+}
+
+impl HfTokenizer {
+    pub fn load(model_dir: &Path) -> Result<Self, String> {
+        // Try tokenizer.json first (pre-built, most reliable)
+        let json_path = model_dir.join("tokenizer.json");
+        if json_path.exists() {
+            let inner = tokenizers::Tokenizer::from_file(&json_path)
+                .map_err(|e| format!("Failed to load tokenizer.json: {}", e))?;
+            log::info!("Loaded HF tokenizer from tokenizer.json");
+            return Ok(Self { inner });
+        }
+
+        // Build from vocab.json + merges.txt (matching Python ONNX trace)
+        let vocab_path = model_dir.join("vocab.json");
+        let merges_path = model_dir.join("merges.txt");
+
+        if !vocab_path.exists() || !merges_path.exists() {
+            return Err(format!(
+                "Tokenizer files not found in {}. Need tokenizer.json OR vocab.json + merges.txt",
+                model_dir.display()
+            ));
+        }
+
+        let bpe = tokenizers::models::bpe::BPE::from_file(
+            vocab_path.to_str().ok_or("Invalid vocab path encoding")?,
+            merges_path.to_str().ok_or("Invalid merges path encoding")?,
+        )
+        .build()
+        .map_err(|e| format!("Failed to build BPE model: {}", e))?;
+
+        let mut inner = tokenizers::Tokenizer::new(bpe);
+
+        // ByteLevel pre-tokenizer with add_prefix_space=false
+        // Matches: tokenizers.pre_tokenizers.ByteLevel(add_prefix_space=False)
+        inner.with_pre_tokenizer(Some(
+            tokenizers::pre_tokenizers::byte_level::ByteLevel::new(
+                false, // add_prefix_space
+                true,  // trim_offsets
+                true,  // use_regex
+            ),
+        ));
+
+        log::info!("Built HF tokenizer from vocab.json + merges.txt (ByteLevel BPE)");
+        Ok(Self { inner })
+    }
+
+    pub fn tokenize(&self, text: &str) -> Vec<i64> {
+        match self.inner.encode(text, false) {
+            Ok(encoding) => encoding.get_ids().iter().map(|&id| id as i64).collect(),
+            Err(e) => {
+                log::error!("Tokenization failed: {}", e);
+                Vec::new()
+            }
+        }
+    }
+}
+
+// ── BPE Tokenizer (for Qwen3 TTS — legacy fallback) ────────────
 
 pub struct BpeTokenizer {
     vocab: HashMap<String, i64>,

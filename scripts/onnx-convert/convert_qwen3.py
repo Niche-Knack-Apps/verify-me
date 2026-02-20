@@ -136,38 +136,42 @@ class CodePredictorEmbedModule(nn.Module):
     The code predictor has (num_code_groups - 1) embeddings, one for each group
     after the first (the first group uses the main codec_embedding from the talker).
 
-    Input:  group_idx (int), token_ids (int64) [batch, 1]
-    Output: embedded (float32) [batch, 1, code_pred_hidden_or_talker_hidden]
+    Input:  group_idx (int64 [1]), token_ids (int64 [batch, seq])
+    Output: embedded (float32) [batch, seq, embed_dim]
 
-    For ONNX, we export all embeddings as a single module that takes
-    (group_idx, token_ids) and selects the right embedding.
-    Since ONNX doesn't support dynamic indexing into ModuleList well,
-    we concatenate all embedding weight matrices and use gather.
+    For ONNX, we concatenate all embedding weight matrices into a single
+    [num_groups * vocab, dim] parameter and use arithmetic indexing to select
+    the correct group. This avoids the torch.stack + dynamic index pattern
+    which causes ONNX trace to fold away unused groups' weights.
     """
 
     def __init__(self, codec_embeddings: nn.ModuleList):
         super().__init__()
-        self.codec_embeddings = codec_embeddings
-        self.num_groups = len(codec_embeddings)
+        num_groups = len(codec_embeddings)
+        vocab_size = codec_embeddings[0].weight.shape[0]
+        embed_dim = codec_embeddings[0].weight.shape[1]
+
+        # Concatenate all embedding weights into a single [num_groups * vocab, dim] matrix
+        weights = torch.cat([emb.weight.data for emb in codec_embeddings], dim=0)
+        self.all_weights = nn.Parameter(weights)
+        self.num_groups = num_groups
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
 
     def forward(self, group_idx: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
         """Forward pass selecting the embedding for the given group index.
 
         Args:
-            group_idx: scalar int64 tensor, which embedding group (0 to num_groups-1)
+            group_idx: [1] int64 tensor, which embedding group (0 to num_groups-1)
             token_ids: [batch, seq] int64 token IDs
         Returns:
             embedded: [batch, seq, embed_dim]
         """
-        # Simple approach: compute all embeddings and select
-        # This is fine for export since ONNX will optimize
-        results = []
-        for emb in self.codec_embeddings:
-            results.append(emb(token_ids))
-        # Stack: [num_groups, batch, seq, dim]
-        stacked = torch.stack(results, dim=0)
-        # Select by group_idx: [batch, seq, dim]
-        return stacked[group_idx]
+        # Offset token IDs by group: actual_idx = group_idx * vocab_size + token_ids
+        offset = group_idx[0] * self.vocab_size
+        offset_ids = token_ids + offset
+        # Single embedding lookup from concatenated weight matrix
+        return nn.functional.embedding(offset_ids, self.all_weights)
 
 
 class CodePredictorModule(nn.Module):
@@ -271,6 +275,7 @@ def export_onnx(
                 dynamic_axes=dynamic_axes or {},
                 opset_version=opset,
                 do_constant_folding=True,
+                dynamo=False,
             )
         else:
             torch.onnx.export(
@@ -282,6 +287,7 @@ def export_onnx(
                 dynamic_axes=dynamic_axes or {},
                 opset_version=opset,
                 do_constant_folding=True,
+                dynamo=False,
             )
 
     # Verify the exported model
@@ -451,85 +457,124 @@ def convert_variant(
     )
 
     # ---- 3. talker_prefill.onnx ----
-    # Full talker model forward for KV-cache prefill (inputs_embeds -> logits + hidden)
+    # Full talker model forward for KV-cache prefill
+    # Inputs: inputs_embeds, position_ids (MRoPE: [3, batch, seq])
+    # Outputs: logits, hidden_states, past_key_values (flattened KV cache)
     logger.info("[3/9] talker_prefill.onnx")
 
     class TalkerPrefillModule(nn.Module):
-        """Talker forward pass for prefill: inputs_embeds -> logits, last_hidden."""
-        def __init__(self, talker_model, codec_head):
+        """Talker forward pass for prefill with KV cache output."""
+        def __init__(self, talker_model, codec_head, num_layers):
             super().__init__()
             self.model = talker_model
             self.codec_head = codec_head
+            self.num_layers = num_layers
 
-        def forward(self, inputs_embeds: torch.Tensor, attention_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        def forward(self, inputs_embeds: torch.Tensor, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             outputs = self.model(
                 inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                use_cache=False,
+                position_ids=position_ids,
+                use_cache=True,
                 output_hidden_states=False,
             )
             hidden = outputs.last_hidden_state
             logits = self.codec_head(hidden)
-            return logits, hidden
 
-    prefill_mod = TalkerPrefillModule(talker.model, talker.codec_head)
+            # Flatten KV cache: tuple of (key, value) -> [num_layers, 2, batch, heads, seq, dim]
+            past_kv = outputs.past_key_values
+            if hasattr(past_kv, 'to_legacy_cache'):
+                past_kv = past_kv.to_legacy_cache()
+            kv_flat = torch.stack([torch.stack([k, v]) for k, v in past_kv])
+
+            return logits, hidden, kv_flat
+
+    prefill_mod = TalkerPrefillModule(talker.model, talker.codec_head, NUM_TALKER_LAYERS)
     prefill_mod.eval()
 
     seq_len = 32
     dummy_embeds = torch.randn(1, seq_len, TALKER_HIDDEN)
-    dummy_mask = torch.ones(1, seq_len, dtype=torch.int64)
+    # MRoPE position_ids: [3, 1, seq_len] — all 3 dims identical for TTS
+    dummy_pos = torch.arange(seq_len, dtype=torch.int64).unsqueeze(0).unsqueeze(0).expand(3, 1, seq_len)
 
     export_onnx(
         prefill_mod,
-        (dummy_embeds, dummy_mask),
+        (dummy_embeds, dummy_pos),
         output_dir / "talker_prefill.onnx",
-        input_names=["inputs_embeds", "attention_mask"],
-        output_names=["logits", "hidden_states"],
+        input_names=["inputs_embeds", "position_ids"],
+        output_names=["logits", "hidden_states", "past_key_values"],
         dynamic_axes={
             "inputs_embeds": {0: "batch", 1: "seq_len"},
-            "attention_mask": {0: "batch", 1: "seq_len"},
+            "position_ids": {2: "seq_len"},
             "logits": {0: "batch", 1: "seq_len"},
             "hidden_states": {0: "batch", 1: "seq_len"},
+            "past_key_values": {4: "seq_len"},
         },
         skip_existing=_skip,
     )
 
     # ---- 4. talker_decode.onnx ----
-    # Single-step decode (same architecture, just exported with seq_len=1 hint)
-    # In practice, the runtime will manage KV-cache externally
+    # Single-step decode with KV cache input/output
+    # Inputs: inputs_embeds, position_ids (MRoPE: [3, 1, 1]), past_key_values
+    # Outputs: logits, hidden_states, past_key_values (updated)
     logger.info("[4/9] talker_decode.onnx")
 
     class TalkerDecodeModule(nn.Module):
-        """Single-step talker decode: 1-token input -> logits + hidden."""
-        def __init__(self, talker_model, codec_head):
+        """Single-step talker decode with KV cache."""
+        def __init__(self, talker_model, codec_head, num_layers):
             super().__init__()
             self.model = talker_model
             self.codec_head = codec_head
+            self.num_layers = num_layers
 
-        def forward(self, inputs_embeds: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        def forward(self, inputs_embeds: torch.Tensor, position_ids: torch.Tensor,
+                    past_key_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            # Unflatten KV cache: [num_layers, 2, batch, heads, seq, dim] -> tuple of (key, value)
+            past_kv = []
+            for i in range(self.num_layers):
+                k = past_key_values[i, 0]  # [batch, heads, seq, dim]
+                v = past_key_values[i, 1]
+                past_kv.append((k, v))
+            past_kv = tuple(past_kv)
+
             outputs = self.model(
                 inputs_embeds=inputs_embeds,
-                use_cache=False,
+                position_ids=position_ids,
+                past_key_values=past_kv,
+                use_cache=True,
                 output_hidden_states=False,
             )
             hidden = outputs.last_hidden_state
             logits = self.codec_head(hidden)
-            return logits, hidden
 
-    decode_mod = TalkerDecodeModule(talker.model, talker.codec_head)
+            # Re-flatten updated KV cache
+            new_kv = outputs.past_key_values
+            if hasattr(new_kv, 'to_legacy_cache'):
+                new_kv = new_kv.to_legacy_cache()
+            kv_flat = torch.stack([torch.stack([k, v]) for k, v in new_kv])
+
+            return logits, hidden, kv_flat
+
+    decode_mod = TalkerDecodeModule(talker.model, talker.codec_head, NUM_TALKER_LAYERS)
     decode_mod.eval()
 
     dummy_step_embeds = torch.randn(1, 1, TALKER_HIDDEN)
+    dummy_step_pos = torch.tensor([[[seq_len]], [[seq_len]], [[seq_len]]], dtype=torch.int64)  # [3, 1, 1]
+    # Dummy KV cache from prefill: [28, 2, 1, 8, seq_len, 128]
+    dummy_kv = torch.randn(NUM_TALKER_LAYERS, 2, 1, NUM_KV_HEADS, seq_len, HEAD_DIM)
+
     export_onnx(
         decode_mod,
-        (dummy_step_embeds,),
+        (dummy_step_embeds, dummy_step_pos, dummy_kv),
         output_dir / "talker_decode.onnx",
-        input_names=["inputs_embeds"],
-        output_names=["logits", "hidden_states"],
+        input_names=["inputs_embeds", "position_ids", "past_key_values"],
+        output_names=["logits", "hidden_states", "past_key_values_out"],
         dynamic_axes={
             "inputs_embeds": {0: "batch", 1: "seq_len"},
+            "position_ids": {2: "seq_len"},
+            "past_key_values": {4: "past_seq_len"},
             "logits": {0: "batch", 1: "seq_len"},
             "hidden_states": {0: "batch", 1: "seq_len"},
+            "past_key_values_out": {4: "total_seq_len"},
         },
         skip_existing=_skip,
     )
@@ -562,17 +607,17 @@ def convert_variant(
     cp_embed = CodePredictorEmbedModule(talker.code_predictor.model.codec_embedding)
     cp_embed.eval()
 
-    dummy_group_idx = torch.tensor(0, dtype=torch.int64)
+    dummy_group_idx = torch.tensor([0], dtype=torch.int64)  # [1] shape, not scalar
     dummy_tok_ids = torch.randint(0, CODE_PRED_VOCAB, (1, 1), dtype=torch.int64)
     export_onnx(
         cp_embed,
         (dummy_group_idx, dummy_tok_ids),
         output_dir / "code_predictor_embed.onnx",
-        input_names=["group_idx", "token_ids"],
-        output_names=["embedded"],
+        input_names=["group_idx", "input_ids"],
+        output_names=["embeds"],
         dynamic_axes={
-            "token_ids": {0: "batch", 1: "seq_len"},
-            "embedded": {0: "batch", 1: "seq_len"},
+            "input_ids": {0: "batch", 1: "seq_len"},
+            "embeds": {0: "batch", 1: "seq_len"},
         },
         skip_existing=_skip,
     )
@@ -670,11 +715,25 @@ def convert_variant(
 
     # ---- Copy tokenizer files ----
     logger.info("Copying tokenizer files...")
-    for fname in ["vocab.json", "merges.txt", "tokenizer_config.json"]:
+    for fname in ["vocab.json", "merges.txt", "tokenizer_config.json", "tokenizer.json"]:
         src = model_dir / fname
         if src.exists():
             shutil.copy2(src, output_dir / fname)
             logger.info("  Copied: %s", fname)
+
+    # Generate tokenizer.json if not already present (for Rust `tokenizers` crate)
+    if not (output_dir / "tokenizer.json").exists():
+        vocab_path = output_dir / "vocab.json"
+        merges_path = output_dir / "merges.txt"
+        if vocab_path.exists() and merges_path.exists():
+            try:
+                from tokenizers import Tokenizer, models, pre_tokenizers
+                tok = Tokenizer(models.BPE.from_file(str(vocab_path), str(merges_path)))
+                tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+                tok.save(str(output_dir / "tokenizer.json"))
+                logger.info("  Generated: tokenizer.json (from vocab.json + merges.txt)")
+            except Exception as e:
+                logger.warning("  Could not generate tokenizer.json: %s", e)
 
     # Also copy config.json and generation_config.json for reference
     for fname in ["config.json", "generation_config.json"]:

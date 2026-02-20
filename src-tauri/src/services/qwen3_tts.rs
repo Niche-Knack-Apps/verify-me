@@ -1,4 +1,4 @@
-use crate::services::tokenizers::BpeTokenizer;
+use crate::services::tokenizers::HfTokenizer;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::{DynValue, Tensor};
@@ -184,12 +184,13 @@ pub struct Qwen3TTSEngine {
     text_project: Session,
     codec_embed: Session,
     code_predictor: Session,
+    #[allow(dead_code)] // Reserved for autoregressive code_predictor implementation
     code_predictor_embed: Session,
     talker_prefill: Session,
     talker_decode: Session,
     tokenizer12hz_decode: Session,
     speaker_encoder: Option<Session>,
-    tokenizer: BpeTokenizer,
+    tokenizer: HfTokenizer,
     /// Cached tts_pad text embedding [hidden_size], used as trailing_text_hidden in decode loop.
     tts_pad_embed: Vec<f32>,
 }
@@ -218,10 +219,7 @@ impl Qwen3TTSEngine {
             gen_config.subtalker_top_k
         );
 
-        let tokenizer = BpeTokenizer::load(
-            &model_dir.join("vocab.json"),
-            &model_dir.join("merges.txt"),
-        )?;
+        let tokenizer = HfTokenizer::load(model_dir)?;
 
         let mut text_project = load_session(&model_dir.join("text_project.onnx"), "text_project")?;
         let codec_embed = load_session(&model_dir.join("codec_embed.onnx"), "codec_embed")?;
@@ -321,7 +319,7 @@ impl Qwen3TTSEngine {
 
         // 1. Build prompt embeddings
         let t = std::time::Instant::now();
-        let (embeddings, seq_len, trailing_text_hidden) = self.build_prompt_embeddings(text, voice_id)?;
+        let (embeddings, seq_len, trailing_text_hidden, text_token_ids) = self.build_prompt_embeddings(text, voice_id)?;
         let trailing_len = trailing_text_hidden.len() / self.config.hidden_size;
         let elapsed_ms = t.elapsed().as_millis();
         log::info!(
@@ -343,6 +341,7 @@ impl Qwen3TTSEngine {
                     "voice": voice_id,
                     "seq_len": seq_len,
                     "trailing_tokens": trailing_len,
+                    "text_token_ids": text_token_ids,
                     "first_8_values": first_8,
                     "elapsed_ms": elapsed_ms,
                 }
@@ -455,7 +454,17 @@ impl Qwen3TTSEngine {
             }));
         }
 
-        // 5. Speed adjustment + write WAV
+        // 5. Peak-normalize audio to consistent loudness
+        let peak = audio.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        if peak > 1e-6 {
+            let gain = 0.95 / peak;
+            for s in &mut audio {
+                *s *= gain;
+            }
+            log::info!("[4.5] Peak-normalized: peak {:.4} → 0.95 (gain {:.2}x)", peak, gain);
+        }
+
+        // 6. Speed adjustment + write WAV
         if (speed - 1.0).abs() > 0.01 {
             audio = resample_audio(&audio, speed);
         }
@@ -573,16 +582,18 @@ impl Qwen3TTSEngine {
     ///   tts_pad + think, tts_pad + think_bos, tts_pad + language_id,
     ///   tts_pad + think_eos, tts_pad + spk, tts_bos + codec_pad
     ///
-    /// Returns (flat_embeddings, prefill_len=10, trailing_text_hidden).
+    /// Returns (flat_embeddings, prefill_len=10, trailing_text_hidden, text_token_ids).
     ///
     /// `trailing_text_hidden` contains text_project embeddings for text_tokens[1:]
     /// + tts_eos. These are drip-fed one per decode step to maintain text–audio
     /// alignment (per the reference implementation).
+    ///
+    /// `text_token_ids` is returned for checkpoint logging.
     fn build_prompt_embeddings(
         &mut self,
         text: &str,
         voice_id: &str,
-    ) -> Result<(Vec<f32>, usize, Vec<f32>), String> {
+    ) -> Result<(Vec<f32>, usize, Vec<f32>, Vec<i64>), String> {
         let h = self.config.hidden_size;
         let cfg = &self.config;
 
@@ -600,9 +611,16 @@ impl Qwen3TTSEngine {
         let language_id = self.determine_language_id(&voice_lower, text);
         log::info!("Language ID for voice '{}': {}", voice_lower, language_id);
 
-        // BPE-encode the text
+        // Tokenize the text (HuggingFace ByteLevel BPE)
         let text_tokens = self.tokenizer.tokenize(text);
         let text_len = text_tokens.len();
+        log::info!(
+            "HF tokens for '{}': {} tokens -> {:?}{}",
+            &text[..std::cmp::min(text.len(), 40)],
+            text_len,
+            &text_tokens[..std::cmp::min(text_len, 20)],
+            if text_len > 20 { "..." } else { "" }
+        );
         if text_len == 0 {
             return Err("Cannot generate speech from empty text".into());
         }
@@ -685,7 +703,7 @@ impl Qwen3TTSEngine {
             &trailing_ids,
         )?;
 
-        Ok((final_embeds, prefill_len, trailing_text_hidden))
+        Ok((final_embeds, prefill_len, trailing_text_hidden, text_tokens))
     }
 
     // ── Prefill ───────────────────────────────────────────────────
@@ -871,13 +889,12 @@ impl Qwen3TTSEngine {
             }
 
             // 5. Embed all 16 codes: codec_embed(first_code) + sum(codec_embed(code_i))
-            //    NOTE: We use the talker's codec_embed for all codes (including the 15
-            //    predicted codes). The code_predictor_embed ONNX model has a broken export
-            //    (only group 0 weights were captured correctly; groups 1-14 are wrong).
-            //    Using codec_embed for all codes produces matching results and correct audio.
-            //
-            //    We batch all 15 codes into a single codec_embed call to avoid 15 separate
-            //    ONNX session runs per decode step.
+            //    NOTE: The ONNX code_predictor runs non-autoregressively (single pass),
+            //    while the reference PyTorch model runs it autoregressively (15 steps with
+            //    KV cache). Using per-group code_predictor_embed with non-autoregressive
+            //    predictions causes talker divergence. The codec_embed workaround keeps
+            //    feedback in-distribution for the talker. Proper fix: implement autoregressive
+            //    code_predictor with KV cache (code_predictor_prefill + code_predictor_decode).
             let mut total_embed = first_code_embed;
 
             let pred_codes_embeds =
@@ -1054,6 +1071,29 @@ fn run_embed_batch(session: &mut Session, input_name: &str, token_ids: &[i64]) -
     let (_shape, data) = outputs[0]
         .try_extract_tensor::<f32>()
         .map_err(|e| format!("Embed batch extraction: {}", e))?;
+
+    Ok(data.to_vec())
+}
+
+/// Run code_predictor_embed: group_idx [1] + input_ids [1,1] -> embeds [1,1,dim] -> flat [dim].
+#[allow(dead_code)] // Reserved for autoregressive code_predictor implementation
+fn run_code_predictor_embed(
+    session: &mut Session,
+    group_idx: i64,
+    token_id: i64,
+) -> Result<Vec<f32>, String> {
+    let group_tensor = Tensor::from_array((vec![1i64], vec![group_idx]))
+        .map_err(|e| format!("CP embed group tensor: {}", e))?;
+    let id_tensor = Tensor::from_array((vec![1i64, 1i64], vec![token_id]))
+        .map_err(|e| format!("CP embed id tensor: {}", e))?;
+
+    let outputs = session
+        .run(ort::inputs!["group_idx" => group_tensor, "input_ids" => id_tensor])
+        .map_err(|e| format!("code_predictor_embed error (group={}): {}", group_idx, e))?;
+
+    let (_shape, data) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| format!("CP embed extraction: {}", e))?;
 
     Ok(data.to_vec())
 }
