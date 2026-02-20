@@ -22,15 +22,17 @@ Architecture (Qwen3TTSForConditionalGeneration):
   - speech_tokenizer (shared) -> 12Hz encoder/decoder for audio <-> codes
 
 Output ONNX files per variant:
-  text_project.onnx           -- text_embedding + text_projection (text IDs -> hidden)
-  talker_prefill.onnx         -- full talker model forward for KV-cache prefill
-  talker_decode.onnx          -- single-step talker decode with KV-cache
-  code_predictor.onnx         -- code predictor transformer + lm_heads
-  code_predictor_embed.onnx   -- code predictor input embeddings (codec_embedding list)
-  codec_embed.onnx            -- main codec_embedding (feedback into talker)
-  tokenizer12hz_encode.onnx   -- speech tokenizer encoder
-  tokenizer12hz_decode.onnx   -- speech tokenizer decoder
-  speaker_encoder.onnx        -- ECAPA-TDNN speaker encoder (Base variant only)
+  text_project.onnx              -- text_embedding + text_projection (text IDs -> hidden)
+  talker_prefill.onnx            -- full talker model forward for KV-cache prefill
+  talker_decode.onnx             -- single-step talker decode with KV-cache
+  code_predictor_prefill.onnx    -- code predictor prefill with KV-cache output
+  code_predictor_decode.onnx     -- code predictor single-step decode with KV-cache
+  code_predictor_embed.onnx      -- code predictor input embeddings (codec_embedding list)
+  codec_embed.onnx               -- main codec_embedding (feedback into talker)
+  codec_head.onnx                -- project hidden to codec vocab logits
+  tokenizer12hz_encode.onnx      -- speech tokenizer encoder
+  tokenizer12hz_decode.onnx      -- speech tokenizer decoder
+  speaker_encoder.onnx           -- ECAPA-TDNN speaker encoder (Base variant only)
 
 Usage:
   python convert_qwen3.py --model-dir /path/to/qwen3-tts/ --variant customvoice
@@ -174,51 +176,78 @@ class CodePredictorEmbedModule(nn.Module):
         return nn.functional.embedding(offset_ids, self.all_weights)
 
 
-class CodePredictorModule(nn.Module):
-    """Wraps the code predictor transformer + lm_heads for ONNX export.
+class CodePredictorPrefillModule(nn.Module):
+    """Code predictor prefill: inputs_embeds → logits + KV cache.
 
-    This exports the forward pass of the code predictor model (without the
-    autoregressive generate loop, which must be implemented in the runtime).
-
-    Input:
-        inputs_embeds: [batch, seq, code_pred_hidden]
-    Output:
-        logits_list: tuple of (num_code_groups - 1) tensors, each [batch, seq, code_pred_vocab]
-        hidden_states: [batch, seq, code_pred_hidden]
+    Input:  inputs_embeds [batch, 2, talker_hidden] (talker_hidden + codec_embed)
+    Output: all_logits [batch, 2, 15 * vocab], past_key_values [layers, 2, batch, heads, 2, dim]
     """
 
-    def __init__(self, code_predictor):
+    def __init__(self, code_predictor, num_layers):
         super().__init__()
-        self.model = code_predictor.model  # The transformer
-        self.lm_heads = code_predictor.lm_head  # ModuleList of Linear
+        self.model = code_predictor.model
+        self.lm_heads = code_predictor.lm_head
         self.small_to_mtp_projection = code_predictor.small_to_mtp_projection
+        self.num_layers = num_layers
 
     def forward(self, inputs_embeds: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Single forward pass through the code predictor.
-
-        Args:
-            inputs_embeds: [batch, seq, talker_hidden] - projected from talker hidden + codec embeds
-        Returns:
-            all_logits: [batch, seq, code_pred_vocab * num_heads] - concatenated logits
-            hidden: [batch, seq, code_pred_hidden] - last hidden state
-        """
-        # Project from talker hidden to predictor hidden if needed
         projected = self.small_to_mtp_projection(inputs_embeds)
-
         outputs = self.model(
             inputs_embeds=projected,
-            use_cache=False,
+            use_cache=True,
             output_hidden_states=False,
         )
         hidden = outputs.last_hidden_state
+        all_logits = torch.cat([head(hidden) for head in self.lm_heads], dim=-1)
 
-        # Compute logits for each code group head
-        all_logits = []
-        for head in self.lm_heads:
-            all_logits.append(head(hidden))
+        past_kv = outputs.past_key_values
+        if hasattr(past_kv, 'to_legacy_cache'):
+            past_kv = past_kv.to_legacy_cache()
+        kv_flat = torch.stack([torch.stack([k, v]) for k, v in past_kv])
 
-        # Concatenate along last dim: [batch, seq, vocab * num_heads]
-        return torch.cat(all_logits, dim=-1), hidden
+        return all_logits, kv_flat
+
+
+class CodePredictorDecodeModule(nn.Module):
+    """Code predictor single-step decode with KV cache.
+
+    Input:  inputs_embeds [batch, 1, talker_hidden], position_ids [batch, 1],
+            past_key_values [layers, 2, batch, heads, prev_len, dim]
+    Output: all_logits [batch, 1, 15 * vocab],
+            past_key_values_out [layers, 2, batch, heads, prev_len+1, dim]
+    """
+
+    def __init__(self, code_predictor, num_layers):
+        super().__init__()
+        self.model = code_predictor.model
+        self.lm_heads = code_predictor.lm_head
+        self.small_to_mtp_projection = code_predictor.small_to_mtp_projection
+        self.num_layers = num_layers
+
+    def forward(self, inputs_embeds: torch.Tensor, position_ids: torch.Tensor,
+                past_key_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        from transformers import DynamicCache
+        cache = DynamicCache()
+        for i in range(self.num_layers):
+            cache.update(past_key_values[i, 0], past_key_values[i, 1], i)
+
+        projected = self.small_to_mtp_projection(inputs_embeds)
+        outputs = self.model(
+            inputs_embeds=projected,
+            position_ids=position_ids,
+            past_key_values=cache,
+            use_cache=True,
+            output_hidden_states=False,
+        )
+        hidden = outputs.last_hidden_state
+        all_logits = torch.cat([head(hidden) for head in self.lm_heads], dim=-1)
+
+        new_kv = outputs.past_key_values
+        if hasattr(new_kv, 'to_legacy_cache'):
+            new_kv = new_kv.to_legacy_cache()
+        kv_flat = torch.stack([torch.stack([k, v]) for k, v in new_kv])
+
+        return all_logits, kv_flat
 
 
 class SpeakerEncoderModule(nn.Module):
@@ -579,31 +608,55 @@ def convert_variant(
         skip_existing=_skip,
     )
 
-    # ---- 5. code_predictor.onnx ----
-    # Code predictor transformer + all lm_heads
-    logger.info("[5/9] code_predictor.onnx")
-    code_pred = CodePredictorModule(talker.code_predictor)
-    code_pred.eval()
+    # ---- 5a. code_predictor_prefill.onnx ----
+    # Autoregressive code predictor: prefill with KV cache output
+    logger.info("[5a/10] code_predictor_prefill.onnx")
+    cp_prefill = CodePredictorPrefillModule(talker.code_predictor, CODE_PRED_LAYERS)
+    cp_prefill.eval()
 
-    # Input: [batch, seq, talker_hidden] (from talker hidden + codec embed)
     dummy_pred_input = torch.randn(1, 2, TALKER_HIDDEN)
     export_onnx(
-        code_pred,
+        cp_prefill,
         (dummy_pred_input,),
-        output_dir / "code_predictor.onnx",
+        output_dir / "code_predictor_prefill.onnx",
         input_names=["inputs_embeds"],
-        output_names=["all_logits", "hidden_states"],
+        output_names=["all_logits", "past_key_values"],
         dynamic_axes={
             "inputs_embeds": {0: "batch", 1: "seq_len"},
             "all_logits": {0: "batch", 1: "seq_len"},
-            "hidden_states": {0: "batch", 1: "seq_len"},
+            "past_key_values": {4: "seq_len"},
+        },
+        skip_existing=_skip,
+    )
+
+    # ---- 5b. code_predictor_decode.onnx ----
+    # Autoregressive code predictor: single-step decode with KV cache
+    logger.info("[5b/10] code_predictor_decode.onnx")
+    cp_decode = CodePredictorDecodeModule(talker.code_predictor, CODE_PRED_LAYERS)
+    cp_decode.eval()
+
+    cp_prefill_seq = 2
+    dummy_cp_step = torch.randn(1, 1, TALKER_HIDDEN)
+    dummy_cp_pos = torch.tensor([[cp_prefill_seq]], dtype=torch.int64)
+    dummy_cp_kv = torch.randn(CODE_PRED_LAYERS, 2, 1, NUM_KV_HEADS, cp_prefill_seq, HEAD_DIM)
+    export_onnx(
+        cp_decode,
+        (dummy_cp_step, dummy_cp_pos, dummy_cp_kv),
+        output_dir / "code_predictor_decode.onnx",
+        input_names=["inputs_embeds", "position_ids", "past_key_values"],
+        output_names=["all_logits", "past_key_values_out"],
+        dynamic_axes={
+            "inputs_embeds": {0: "batch"},
+            "past_key_values": {4: "past_seq_len"},
+            "all_logits": {0: "batch"},
+            "past_key_values_out": {4: "total_seq_len"},
         },
         skip_existing=_skip,
     )
 
     # ---- 6. code_predictor_embed.onnx ----
     # Code predictor per-group embeddings
-    logger.info("[6/9] code_predictor_embed.onnx")
+    logger.info("[6/10] code_predictor_embed.onnx")
     cp_embed = CodePredictorEmbedModule(talker.code_predictor.model.codec_embedding)
     cp_embed.eval()
 
@@ -626,7 +679,7 @@ def convert_variant(
     speech_tokenizer = load_speech_tokenizer(model_dir)
     if speech_tokenizer is not None:
         # 7. tokenizer12hz_encode.onnx
-        logger.info("[7/9] tokenizer12hz_encode.onnx")
+        logger.info("[7/10] tokenizer12hz_encode.onnx")
 
         class TokenizerEncodeModule(nn.Module):
             """Wraps speech tokenizer encoder for ONNX."""
@@ -658,7 +711,7 @@ def convert_variant(
         )
 
         # 8. tokenizer12hz_decode.onnx
-        logger.info("[8/9] tokenizer12hz_decode.onnx")
+        logger.info("[8/10] tokenizer12hz_decode.onnx")
 
         class TokenizerDecodeModule(nn.Module):
             """Wraps speech tokenizer decoder for ONNX."""
@@ -692,7 +745,7 @@ def convert_variant(
 
     # ---- 9. speaker_encoder.onnx (Base variant only) ----
     if model.speaker_encoder is not None:
-        logger.info("[9/9] speaker_encoder.onnx")
+        logger.info("[9/10] speaker_encoder.onnx")
         spk_enc = SpeakerEncoderModule(model.speaker_encoder)
         spk_enc.eval()
 
@@ -711,7 +764,7 @@ def convert_variant(
             skip_existing=_skip,
         )
     else:
-        logger.info("[9/9] speaker_encoder.onnx -- SKIPPED (not present in %s variant)", variant)
+        logger.info("[9/10] speaker_encoder.onnx -- SKIPPED (not present in %s variant)", variant)
 
     # ---- Copy tokenizer files ----
     logger.info("Copying tokenizer files...")

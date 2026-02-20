@@ -102,6 +102,11 @@ struct Qwen3TTSConfig {
     hidden_size: usize,
     num_code_groups: usize,
     codec_vocab_size: usize,
+
+    // Code predictor dimensions (for KV cache)
+    cp_num_layers: usize,
+    cp_num_kv_heads: usize,
+    cp_head_dim: usize,
 }
 
 impl Qwen3TTSConfig {
@@ -168,6 +173,9 @@ impl Qwen3TTSConfig {
             hidden_size: talker["hidden_size"].as_u64().unwrap_or(2048) as usize,
             num_code_groups: talker["num_code_groups"].as_u64().unwrap_or(16) as usize,
             codec_vocab_size: cp_config["vocab_size"].as_u64().unwrap_or(2048) as usize,
+            cp_num_layers: cp_config["num_hidden_layers"].as_u64().unwrap_or(5) as usize,
+            cp_num_kv_heads: cp_config["num_key_value_heads"].as_u64().unwrap_or(8) as usize,
+            cp_head_dim: cp_config["head_dim"].as_u64().unwrap_or(128) as usize,
         })
     }
 }
@@ -183,8 +191,8 @@ pub struct Qwen3TTSEngine {
     gen_config: GenerationConfig,
     text_project: Session,
     codec_embed: Session,
-    code_predictor: Session,
-    #[allow(dead_code)] // Reserved for autoregressive code_predictor implementation
+    code_predictor_prefill: Session,
+    code_predictor_decode: Session,
     code_predictor_embed: Session,
     talker_prefill: Session,
     talker_decode: Session,
@@ -223,8 +231,14 @@ impl Qwen3TTSEngine {
 
         let mut text_project = load_session(&model_dir.join("text_project.onnx"), "text_project")?;
         let codec_embed = load_session(&model_dir.join("codec_embed.onnx"), "codec_embed")?;
-        let code_predictor =
-            load_session(&model_dir.join("code_predictor.onnx"), "code_predictor")?;
+        let code_predictor_prefill = load_session(
+            &model_dir.join("code_predictor_prefill.onnx"),
+            "code_predictor_prefill",
+        )?;
+        let code_predictor_decode = load_session(
+            &model_dir.join("code_predictor_decode.onnx"),
+            "code_predictor_decode",
+        )?;
         let code_predictor_embed = load_session(
             &model_dir.join("code_predictor_embed.onnx"),
             "code_predictor_embed",
@@ -278,7 +292,8 @@ impl Qwen3TTSEngine {
             gen_config,
             text_project,
             codec_embed,
-            code_predictor,
+            code_predictor_prefill,
+            code_predictor_decode,
             code_predictor_embed,
             talker_prefill,
             talker_decode,
@@ -806,10 +821,16 @@ impl Qwen3TTSEngine {
         let mut cur_logits = initial_logits;
         let mut cur_hidden = initial_hidden;
 
-        // Look up actual KV cache output name from session metadata (index 2).
+        // Look up actual KV cache output name from session metadata.
         let kv_output_name = self.talker_decode.outputs().get(2)
             .map(|o| o.name().to_string())
             .ok_or_else(|| "talker_decode: no output at index 2 for KV cache".to_string())?;
+        let cp_prefill_kv_name = self.code_predictor_prefill.outputs().get(1)
+            .map(|o| o.name().to_string())
+            .ok_or_else(|| "CP prefill: no output at index 1 for KV cache".to_string())?;
+        let cp_decode_kv_name = self.code_predictor_decode.outputs().get(1)
+            .map(|o| o.name().to_string())
+            .ok_or_else(|| "CP decode: no output at index 1 for KV cache".to_string())?;
 
         let start = std::time::Instant::now();
         let mut rng = rand::thread_rng();
@@ -854,55 +875,108 @@ impl Qwen3TTSEngine {
             let first_code_embed =
                 run_embed_single(&mut self.codec_embed, "input_ids", first_code)?;
 
-            // 4. Run code_predictor: cat(hidden, first_code_embed) -> [1, 2, hidden_size]
+            // 4. Autoregressive code_predictor: predict 15 codes with KV cache
+            //    Prefill: [talker_hidden, codec_embed(first_code)] -> logits + KV cache
+            //    Decode:  code_predictor_embed(group, code) -> logits + updated KV cache
+            let cv = cfg.codec_vocab_size;
+            let mut predicted_codes = [0i64; 15];
+
+            // 4a. Code predictor prefill: [hidden, first_code_embed] -> logits + KV cache
             let mut cp_input = vec![0.0f32; 2 * h];
             cp_input[..h].copy_from_slice(&cur_hidden);
             cp_input[h..].copy_from_slice(&first_code_embed);
 
             let cp_tensor =
                 Tensor::from_array((vec![1i64, 2, h as i64], cp_input))
-                    .map_err(|e| format!("Code predictor tensor: {}", e))?;
+                    .map_err(|e| format!("CP prefill tensor: {}", e))?;
 
-            let cp_outputs = self
-                .code_predictor
+            let mut cp_outputs = self
+                .code_predictor_prefill
                 .run(ort::inputs!["inputs_embeds" => cp_tensor])
-                .map_err(|e| format!("code_predictor error at step {}: {}", step, e))?;
+                .map_err(|e| format!("CP prefill error at step {}: {}", step, e))?;
 
-            // all_logits: [1, 2, 15, codec_vocab_size]
-            let (_shape, cp_logits_data) = cp_outputs[0]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| format!("Code predictor output: {}", e))?;
+            // all_logits: [1, 2, 15 * cv] — take position 1, head 0
+            {
+                let (_shape, cp_logits_data) = cp_outputs[0]
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| format!("CP prefill logits: {}", e))?;
 
-            // Take last position (pos=1) -> [15, codec_vocab_size]
-            let cv = cfg.codec_vocab_size;
-            let pos1_offset = 15 * cv; // skip pos 0
-            let mut predicted_codes = [0i64; 15];
-            for head in 0..15 {
-                let head_start = pos1_offset + head * cv;
-                let head_logits = &cp_logits_data[head_start..head_start + cv];
-                predicted_codes[head] = sample_top_k(
-                    head_logits,
+                let pos1_offset = 15 * cv; // skip position 0
+                let head0_logits = &cp_logits_data[pos1_offset..pos1_offset + cv];
+                predicted_codes[0] = sample_top_k(
+                    head0_logits,
                     self.gen_config.subtalker_temperature,
                     self.gen_config.subtalker_top_k,
                     &mut rng,
                 ) as i64;
             }
 
-            // 5. Embed all 16 codes: codec_embed(first_code) + sum(codec_embed(code_i))
-            //    NOTE: The ONNX code_predictor runs non-autoregressively (single pass),
-            //    while the reference PyTorch model runs it autoregressively (15 steps with
-            //    KV cache). Using per-group code_predictor_embed with non-autoregressive
-            //    predictions causes talker divergence. The codec_embed workaround keeps
-            //    feedback in-distribution for the talker. Proper fix: implement autoregressive
-            //    code_predictor with KV cache (code_predictor_prefill + code_predictor_decode).
+            // Extract KV cache as owned DynValue
+            let mut cp_kv: DynValue = cp_outputs
+                .remove(&cp_prefill_kv_name)
+                .ok_or("CP prefill: failed to extract KV cache")?;
+            let mut cp_kv_len: i64 = 2; // prefill had 2 positions
+
+            // 4b. Code predictor decode: 14 autoregressive steps
+
+            for group in 1..15i64 {
+                // Embed previous code with per-group embedding
+                let prev_embed = run_code_predictor_embed(
+                    &mut self.code_predictor_embed,
+                    group - 1,
+                    predicted_codes[(group - 1) as usize],
+                )?;
+
+                let embed_tensor =
+                    Tensor::from_array((vec![1i64, 1, h as i64], prev_embed))
+                        .map_err(|e| format!("CP decode embed tensor: {}", e))?;
+
+                let pos_tensor =
+                    Tensor::from_array((vec![1i64, 1], vec![cp_kv_len]))
+                        .map_err(|e| format!("CP decode pos tensor: {}", e))?;
+
+                let mut cp_dec_outputs = self
+                    .code_predictor_decode
+                    .run(ort::inputs![
+                        "inputs_embeds" => embed_tensor,
+                        "position_ids" => pos_tensor,
+                        "past_key_values" => cp_kv
+                    ])
+                    .map_err(|e| format!("CP decode error at step {}, group {}: {}", step, group, e))?;
+
+                {
+                    let (_shape, dec_logits) = cp_dec_outputs[0]
+                        .try_extract_tensor::<f32>()
+                        .map_err(|e| format!("CP decode logits: {}", e))?;
+
+                    // Pick head [group] logits from position 0
+                    let head_start = group as usize * cv;
+                    let head_logits = &dec_logits[head_start..head_start + cv];
+                    predicted_codes[group as usize] = sample_top_k(
+                        head_logits,
+                        self.gen_config.subtalker_temperature,
+                        self.gen_config.subtalker_top_k,
+                        &mut rng,
+                    ) as i64;
+                }
+
+                cp_kv = cp_dec_outputs
+                    .remove(&cp_decode_kv_name)
+                    .ok_or("CP decode: failed to extract KV cache")?;
+                cp_kv_len += 1;
+            }
+
+            // 5. Embed all 16 codes: codec_embed(first_code) + sum(code_predictor_embed(group, code))
             let mut total_embed = first_code_embed;
 
-            let pred_codes_embeds =
-                run_embed_batch(&mut self.codec_embed, "input_ids", &predicted_codes)?;
-            for i in 0..15 {
-                let offset = i * h;
+            for group in 0..15i64 {
+                let group_embed = run_code_predictor_embed(
+                    &mut self.code_predictor_embed,
+                    group,
+                    predicted_codes[group as usize],
+                )?;
                 for j in 0..h {
-                    total_embed[j] += pred_codes_embeds[offset + j];
+                    total_embed[j] += group_embed[j];
                 }
             }
 
@@ -1076,7 +1150,6 @@ fn run_embed_batch(session: &mut Session, input_name: &str, token_ids: &[i64]) -
 }
 
 /// Run code_predictor_embed: group_idx [1] + input_ids [1,1] -> embeds [1,1,dim] -> flat [dim].
-#[allow(dead_code)] // Reserved for autoregressive code_predictor implementation
 fn run_code_predictor_embed(
     session: &mut Session,
     group_idx: i64,
