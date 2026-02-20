@@ -686,7 +686,10 @@ impl Qwen3TTSEngine {
             }));
         }
 
-        // 2-6. Shared inference pipeline (VoiceDesign always uses instruct)
+        // 2-6. Shared inference pipeline
+        // VoiceDesign uses default temperature (0.9) — the voice description is the
+        // primary conditioning signal baked into the model, not an optional modifier
+        // like CustomVoice instruct. Lower temperature flattens the design effect.
         self.run_inference_pipeline(
             text,
             &embeddings,
@@ -697,7 +700,7 @@ impl Qwen3TTSEngine {
             checkpoint_tx,
             "voice_design",
             total_start,
-            true,
+            false,
         )
     }
 
@@ -1084,8 +1087,8 @@ impl Qwen3TTSEngine {
     /// full text context when generating speech. This is required for instruct
     /// (voice instructions) to work correctly.
     ///
-    /// Layout:
-    ///   [instruct(N)?, role(3), mixed(6), text_tokens+codec_pad, tts_eos+codec_pad, tts_pad+codec_bos]
+    /// Non-streaming layout (matches Python `[:, :-1]` which removes streaming's tts_bos+PAD):
+    ///   [instruct(N)?, role(3), mixed(5), text_tokens+codec_pad(T), tts_eos+codec_pad(1), tts_pad+codec_bos(1)]
     ///
     /// Returns (flat_embeddings, prefill_len, trailing_text_hidden, text_token_ids).
     /// trailing_text_hidden is tts_pad_embed (constant for all decode steps).
@@ -1101,7 +1104,6 @@ impl Qwen3TTSEngine {
         let im_start = self.config.im_start;
         let assistant = self.config.assistant;
         let tts_pad = self.config.tts_pad;
-        let tts_bos = self.config.tts_bos;
         let tts_eos = self.config.tts_eos;
         let codec_think_id = self.config.codec_think_id;
         let codec_think_bos_id = self.config.codec_think_bos_id;
@@ -1144,24 +1146,24 @@ impl Qwen3TTSEngine {
         };
         let instruct_positions = instruct_embeds.as_ref().map_or(0, |e| e.len() / h);
 
-        // Non-streaming layout:
-        //   [instruct(N)?, role(3), mixed(6), text_tokens+codec_pad(T), tts_eos+codec_pad(1), tts_pad+codec_bos(1)]
-        // Total = N + 3 + 6 + T + 1 + 1 = N + T + 11
-        let prefill_len = instruct_positions + 3 + 6 + text_len + 1 + 1;
+        // Non-streaming layout (Python removes streaming's last position tts_bos+PAD):
+        //   [instruct(N)?, role(3), mixed(5), text_tokens+codec_pad(T), tts_eos+codec_pad(1), tts_pad+codec_bos(1)]
+        // Total = N + 3 + 5 + T + 1 + 1 = N + T + 10
+        let mixed_count = 5;
+        let prefill_len = instruct_positions + 3 + mixed_count + text_len + 1 + 1;
 
-        // ── Build text token IDs for role + mixed section (9 positions) ──
+        // ── Build text token IDs for role + mixed section (3 + 5 = 8 positions) ──
         let newline: i64 = 198;
-        let role_mixed_len = 9;
+        let role_mixed_len = 3 + mixed_count;
         let mut role_mixed_ids: Vec<i64> = Vec::with_capacity(role_mixed_len);
         // Role prefix (3)
         role_mixed_ids.push(im_start);
         role_mixed_ids.push(assistant);
         role_mixed_ids.push(newline);
-        // Mixed text side (6): tts_pad × 5 + tts_bos
-        for _ in 0..5 {
+        // Mixed text side (5): tts_pad × 5 (no tts_bos — removed in non-streaming)
+        for _ in 0..mixed_count {
             role_mixed_ids.push(tts_pad);
         }
-        role_mixed_ids.push(tts_bos);
 
         let role_mixed_embeds =
             run_embed_batch(&mut self.text_project, "input_ids", &role_mixed_ids)?;
@@ -1205,8 +1207,8 @@ impl Qwen3TTSEngine {
             final_embeds.extend_from_slice(src);
         }
 
-        // 3. Mixed positions (6): text + codec[0..5]
-        for pos in 0..6 {
+        // 3. Mixed positions (5): tts_pad + codec[0..4] = [THINK, THINK_BOS, LANG, THINK_EOS, SPEAKER]
+        for pos in 0..mixed_count {
             let text_src = &role_mixed_embeds[(3 + pos) * h..(3 + pos + 1) * h];
             let codec_src = &codec_embeds[pos * h..(pos + 1) * h];
             for j in 0..h {
@@ -1250,7 +1252,8 @@ impl Qwen3TTSEngine {
     ///
     /// VoiceDesign uses language=None, so codec = [nothink, think_bos, think_eos, pad, bos] (5 tokens).
     ///
-    /// Layout: [instruct(N), role(3), mixed(4), text_tokens+codec_pad, tts_eos+codec_pad, tts_pad+codec_bos]
+    /// Non-streaming layout (matches Python `[:, :-1]` which removes streaming's tts_bos+PAD):
+    ///   [instruct(N), role(3), mixed(3), text_tokens+codec_pad(T), tts_eos+codec_pad(1), tts_pad+codec_bos(1)]
     fn build_voice_design_embeddings(
         &mut self,
         text: &str,
@@ -1262,7 +1265,6 @@ impl Qwen3TTSEngine {
         let im_start = self.config.im_start;
         let assistant = self.config.assistant;
         let tts_pad = self.config.tts_pad;
-        let tts_bos = self.config.tts_bos;
         let tts_eos = self.config.tts_eos;
         let codec_nothink_id = self.config.codec_nothink_id;
         let codec_think_bos_id = self.config.codec_think_bos_id;
@@ -1281,22 +1283,22 @@ impl Qwen3TTSEngine {
         let instruct_embeds = self.build_instruct_embeddings(instruct)?;
         let instruct_positions = instruct_embeds.len() / h;
 
-        // Codec: 5 tokens (language=None → nothink, no language token)
-        // mixed_count = 5 - 1 = 4 (all codec except bos, which pairs with final tts_pad)
-        let mixed_count = 4;
+        // Non-streaming mixed: Python builds streaming prefill with (codec_len-1) mixed positions
+        // then removes the last (tts_bos+PAD). For VoiceDesign (5 codec), mixed = 5-1-1 = 3.
+        // Mixed pairs: [tts_pad+NOTHINK, tts_pad+THINK_BOS, tts_pad+THINK_EOS]
+        let mixed_count = 3;
         let prefill_len = instruct_positions + 3 + mixed_count + text_len + 1 + 1;
 
-        // Role + mixed text tokens (3 + 4 = 7)
+        // Role + mixed text tokens (3 + 3 = 6)
         let newline: i64 = 198;
         let role_mixed_len = 3 + mixed_count;
         let mut role_mixed_ids: Vec<i64> = Vec::with_capacity(role_mixed_len);
         role_mixed_ids.push(im_start);
         role_mixed_ids.push(assistant);
         role_mixed_ids.push(newline);
-        for _ in 0..mixed_count - 1 {
+        for _ in 0..mixed_count {
             role_mixed_ids.push(tts_pad);
         }
-        role_mixed_ids.push(tts_bos);
 
         let role_mixed_embeds =
             run_embed_batch(&mut self.text_project, "input_ids", &role_mixed_ids)?;
@@ -1308,8 +1310,7 @@ impl Qwen3TTSEngine {
         let text_and_eos_embeds =
             run_embed_batch(&mut self.text_project, "input_ids", &text_and_eos_ids)?;
 
-        // Codec tokens (5, language=None, no speaker):
-        // [nothink, think_bos, think_eos, pad, bos]
+        // Codec tokens needed: mixed [nothink, think_bos, think_eos] + pad + bos
         let codec_ids = vec![
             codec_nothink_id,
             codec_think_bos_id,
@@ -1335,7 +1336,7 @@ impl Qwen3TTSEngine {
             final_embeds.extend_from_slice(src);
         }
 
-        // 3. Mixed (4): text + codec[0..3]
+        // 3. Mixed (3): tts_pad + codec[0..2] = [NOTHINK, THINK_BOS, THINK_EOS]
         for pos in 0..mixed_count {
             let text_src = &role_mixed_embeds[(3 + pos) * h..(3 + pos + 1) * h];
             let codec_src = &codec_embeds[pos * h..(pos + 1) * h];
@@ -1384,8 +1385,8 @@ impl Qwen3TTSEngine {
     ///   codec_1 = [pad, bos] (2 tokens)
     ///   total = 6 codec positions (5 embedded + 1 speaker_embed)
     ///
-    /// Non-streaming layout:
-    ///   [role(3), mixed(5), text_tokens+codec_pad, tts_eos+codec_pad, tts_pad+codec_bos]
+    /// Non-streaming layout (matches Python `[:, :-1]` which removes streaming's tts_bos+PAD):
+    ///   [role(3), mixed(4), text_tokens+codec_pad(T), tts_eos+codec_pad(1), tts_pad+codec_bos(1)]
     fn build_clone_embeddings(
         &mut self,
         text: &str,
@@ -1399,7 +1400,6 @@ impl Qwen3TTSEngine {
         let im_start = self.config.im_start;
         let assistant = self.config.assistant;
         let tts_pad = self.config.tts_pad;
-        let tts_bos = self.config.tts_bos;
         let tts_eos = self.config.tts_eos;
         let codec_nothink_id = self.config.codec_nothink_id;
         let codec_think_bos_id = self.config.codec_think_bos_id;
@@ -1414,22 +1414,22 @@ impl Qwen3TTSEngine {
             return Err("Cannot generate speech from empty text".into());
         }
 
-        // Codec: [nothink, think_bos, think_eos] + speaker + [pad, bos] = 6 positions
-        // mixed_count = 5 (all except bos which pairs with final tts_pad)
-        let mixed_count = 5;
+        // Non-streaming mixed: Python removes streaming's last position (tts_bos+PAD).
+        // Clone codec = 6 positions → streaming mixed = 5, non-streaming mixed = 4.
+        // Mixed pairs: [tts_pad+NOTHINK, tts_pad+THINK_BOS, tts_pad+THINK_EOS, tts_pad+SPEAKER]
+        let mixed_count = 4;
         let prefill_len = 3 + mixed_count + text_len + 1 + 1;
 
-        // Role + mixed text tokens (3 + 5 = 8)
+        // Role + mixed text tokens (3 + 4 = 7)
         let newline: i64 = 198;
         let role_mixed_len = 3 + mixed_count;
         let mut role_mixed_ids: Vec<i64> = Vec::with_capacity(role_mixed_len);
         role_mixed_ids.push(im_start);
         role_mixed_ids.push(assistant);
         role_mixed_ids.push(newline);
-        for _ in 0..mixed_count - 1 {
+        for _ in 0..mixed_count {
             role_mixed_ids.push(tts_pad);
         }
-        role_mixed_ids.push(tts_bos);
 
         let role_mixed_embeds =
             run_embed_batch(&mut self.text_project, "input_ids", &role_mixed_ids)?;
@@ -1441,8 +1441,7 @@ impl Qwen3TTSEngine {
         let text_and_eos_embeds =
             run_embed_batch(&mut self.text_project, "input_ids", &text_and_eos_ids)?;
 
-        // Codec tokens — 5 embeddable (speaker position uses direct embedding)
-        // [nothink, think_bos, think_eos, pad, bos]
+        // Codec tokens — [nothink, think_bos, think_eos] for mixed + [pad, bos] for tail
         let codec_ids = vec![
             codec_nothink_id,
             codec_think_bos_id,
@@ -1464,12 +1463,11 @@ impl Qwen3TTSEngine {
             final_embeds.extend_from_slice(src);
         }
 
-        // 2. Mixed (5): text + codec, with speaker_embed at position 3
+        // 2. Mixed (4): tts_pad + codec/speaker
         //   pos 0 -> codec[0] (nothink)
         //   pos 1 -> codec[1] (think_bos)
         //   pos 2 -> codec[2] (think_eos)
         //   pos 3 -> speaker_embed (direct injection)
-        //   pos 4 -> codec[3] (pad)
         for pos in 0..mixed_count {
             let text_src = &role_mixed_embeds[(3 + pos) * h..(3 + pos + 1) * h];
             if pos == 3 {
@@ -1478,8 +1476,7 @@ impl Qwen3TTSEngine {
                     final_embeds.push(text_src[j] + speaker_embed[j]);
                 }
             } else {
-                let codec_idx = if pos < 3 { pos } else { pos - 1 };
-                let codec_src = &codec_embeds[codec_idx * h..(codec_idx + 1) * h];
+                let codec_src = &codec_embeds[pos * h..(pos + 1) * h];
                 for j in 0..h {
                     final_embeds.push(text_src[j] + codec_src[j]);
                 }
