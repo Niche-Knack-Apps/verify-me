@@ -9,6 +9,7 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -18,6 +19,7 @@ import java.net.URL;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.zip.GZIPInputStream;
 
 @CapacitorPlugin(name = "ModelManager")
 public class ModelManagerPlugin extends Plugin {
@@ -28,7 +30,7 @@ public class ModelManagerPlugin extends Plugin {
 
     // ── Model catalog ───────────────────────────────────────────
     // pocket-tts: bundled in APK assets, extracted on first launch
-    // qwen3-tts-0.6b: downloaded from sivasub987/Qwen3-TTS-0.6B-ONNX-INT8
+    // qwen3-tts-0.6b: downloaded from nicheknack.app
 
     private static final ModelEntry[] KNOWN_MODELS = {
         new ModelEntry(
@@ -55,8 +57,7 @@ public class ModelManagerPlugin extends Plugin {
                 "mimi_decoder_int8.onnx",
                 "tokenizer.model",
             },
-            null, // no HF repo — bundled
-            null  // no HF subdirectory
+            null // no download URL — bundled
         ),
         new ModelEntry(
             "qwen3-tts-0.6b",
@@ -86,97 +87,134 @@ public class ModelManagerPlugin extends Plugin {
                 "talker_decode_q.onnx",
                 "talker_prefill_q.onnx",
             },
-            "sivasub987/Qwen3-TTS-0.6B-ONNX-INT8",
-            null // files at repo root
+            "https://nicheknack.app/downloads/verify-me/models/qwen3-tts-0.6b.tar.gz"
         ),
     };
-
-    // Tokenizer files for Qwen3 (from zukky repo, different from ONNX model files)
-    private static final String[] QWEN3_TOKENIZER_FILES = {
-        "vocab.json",
-        "merges.txt",
-        "tokenizer_config.json",
-    };
-    private static final String QWEN3_TOKENIZER_REPO = "zukky/Qwen3-TTS-ONNX-DLL";
-    private static final String QWEN3_TOKENIZER_SUBDIR = "models/Qwen3-TTS-12Hz-0.6B-Base/";
 
     // ── Plugin methods ──────────────────────────────────────────
 
     @PluginMethod
     public void listModels(PluginCall call) {
-        // No extraction here — return the catalog instantly
-        File modelsDir = getModelsDir();
-        Log.i(TAG, "listModels called, modelsDir=" + modelsDir.getAbsolutePath()
-            + " exists=" + modelsDir.exists());
-        JSArray result = new JSArray();
+        try {
+            File modelsDir = getModelsDir();
+            Log.i(TAG, "listModels called, modelsDir=" + modelsDir.getAbsolutePath()
+                + " exists=" + modelsDir.exists());
 
-        for (ModelEntry entry : KNOWN_MODELS) {
-            JSObject model = new JSObject();
-            model.put("id", entry.id);
-            model.put("name", entry.name);
-            model.put("size", entry.size);
-            model.put("supportsClone", entry.supportsClone);
-            model.put("supportsVoicePrompt", entry.supportsVoicePrompt);
-            model.put("supportsVoiceDesign", entry.supportsVoiceDesign);
-
-            boolean available = isModelDownloaded(modelsDir, entry);
-            if (available) {
-                model.put("status", "available");
-            } else if (entry.bundled) {
-                model.put("status", "bundled");
-            } else {
-                model.put("status", "downloadable");
+            // Verify asset access is working
+            try {
+                String[] assetList = getContext().getAssets().list("models");
+                Log.i(TAG, "Assets under models/: " +
+                    (assetList != null ? String.join(", ", assetList) : "null"));
+            } catch (Exception ae) {
+                Log.e(TAG, "Failed to list assets: " + ae.getMessage());
             }
 
-            JSArray voices = new JSArray();
-            for (String[] voice : entry.voices) {
-                JSObject v = new JSObject();
-                v.put("id", voice[0]);
-                v.put("name", voice[1]);
-                voices.put(v);
-            }
-            model.put("voices", voices);
+            JSArray result = new JSArray();
 
-            if (entry.hfRepo != null) {
-                model.put("hfRepo", entry.hfRepo);
+            for (ModelEntry entry : KNOWN_MODELS) {
+                try {
+                    JSObject model = new JSObject();
+                    model.put("id", entry.id);
+                    model.put("name", entry.name);
+                    model.put("size", entry.size);
+                    model.put("supportsClone", entry.supportsClone);
+                    model.put("supportsVoicePrompt", entry.supportsVoicePrompt);
+                    model.put("supportsVoiceDesign", entry.supportsVoiceDesign);
+
+                    boolean available = isModelDownloaded(modelsDir, entry);
+                    String status;
+                    if (available) {
+                        status = "available";
+                    } else if (entry.bundled) {
+                        status = "bundled";
+                    } else {
+                        status = "downloadable";
+                    }
+                    model.put("status", status);
+
+                    JSArray voices = new JSArray();
+                    for (String[] voice : entry.voices) {
+                        JSObject v = new JSObject();
+                        v.put("id", voice[0]);
+                        v.put("name", voice[1]);
+                        voices.put(v);
+                    }
+                    model.put("voices", voices);
+
+                    if (entry.downloadUrl != null) {
+                        model.put("downloadUrl", entry.downloadUrl);
+                    }
+
+                    result.put(model);
+                    Log.i(TAG, "  model: " + entry.id + " status=" + status
+                        + " bundled=" + entry.bundled + " files=" + entry.files.length);
+                } catch (Exception me) {
+                    Log.e(TAG, "Error building model entry " + entry.id + ": " + me.getMessage());
+                }
             }
 
-            result.put(model);
-            Log.i(TAG, "  model: " + entry.id + " status=" + model.optString("status"));
+            Log.i(TAG, "listModels returning " + result.length() + " models");
+            JSObject ret = new JSObject();
+            ret.put("models", result);
+            call.resolve(ret);
+        } catch (Exception e) {
+            Log.e(TAG, "listModels FAILED: " + e.getMessage(), e);
+            call.reject("listModels failed: " + e.getMessage());
         }
-
-        Log.i(TAG, "listModels returning " + result.length() + " models");
-        JSObject ret = new JSObject();
-        ret.put("models", result);
-        call.resolve(ret);
     }
 
     @PluginMethod
     public void extractBundledModels(PluginCall call) {
         executor.submit(() -> {
-            try {
-                for (ModelEntry entry : KNOWN_MODELS) {
-                    if (!entry.bundled) continue;
-                    if (isModelDownloaded(getModelsDir(), entry)) continue;
-                    extractBundledModel(entry);
-                    JSObject data = new JSObject();
-                    data.put("modelId", entry.id);
-                    data.put("status", "available");
-                    notifyListeners("model-extracted", data);
+            int extracted = 0;
+            int failed = 0;
+            StringBuilder errors = new StringBuilder();
+
+            for (ModelEntry entry : KNOWN_MODELS) {
+                if (!entry.bundled) continue;
+                if (isModelDownloaded(getModelsDir(), entry)) {
+                    Log.i(TAG, "extractBundledModels: " + entry.id + " already available, skipping");
+                    continue;
                 }
-                JSObject ret = new JSObject();
-                ret.put("success", true);
-                call.resolve(ret);
-            } catch (Exception e) {
-                call.reject("Extraction failed: " + e.getMessage());
+                try {
+                    Log.i(TAG, "extractBundledModels: extracting " + entry.id + "...");
+                    extractBundledModel(entry);
+
+                    // Verify extraction succeeded
+                    if (isModelDownloaded(getModelsDir(), entry)) {
+                        extracted++;
+                        JSObject data = new JSObject();
+                        data.put("modelId", entry.id);
+                        data.put("status", "available");
+                        notifyListeners("model-extracted", data);
+                        Log.i(TAG, "extractBundledModels: " + entry.id + " extracted and verified");
+                    } else {
+                        failed++;
+                        String msg = entry.id + ": extracted but verification failed (files too small — likely Git LFS pointers in APK)";
+                        errors.append(msg).append("; ");
+                        Log.e(TAG, "extractBundledModels: " + msg);
+                    }
+                } catch (Exception e) {
+                    failed++;
+                    errors.append(entry.id).append(": ").append(e.getMessage()).append("; ");
+                    Log.e(TAG, "extractBundledModels: failed for " + entry.id, e);
+                }
             }
+
+            JSObject ret = new JSObject();
+            ret.put("success", failed == 0);
+            ret.put("extracted", extracted);
+            ret.put("failed", failed);
+            if (errors.length() > 0) {
+                ret.put("errors", errors.toString());
+            }
+            call.resolve(ret);
         });
     }
 
     @PluginMethod
     public void downloadModel(PluginCall call) {
         String modelId = call.getString("modelId");
-        String hfToken = call.getString("hfToken", null);
 
         if (modelId == null || modelId.isEmpty()) {
             call.reject("modelId is required");
@@ -209,6 +247,11 @@ public class ModelManagerPlugin extends Plugin {
             return;
         }
 
+        if (entry.downloadUrl == null) {
+            call.reject("No download URL for model: " + modelId);
+            return;
+        }
+
         // Check storage
         File modelsDir = getModelsDir();
         if (!modelsDir.exists()) {
@@ -234,35 +277,21 @@ public class ModelManagerPlugin extends Plugin {
                     modelDir.mkdirs();
                 }
 
-                // Download ONNX model files
-                int totalFiles = entry.files.length;
-                for (int i = 0; i < totalFiles; i++) {
-                    if (cancelRequested.get()) {
-                        emitProgress(modelId, "cancelled", 0);
-                        call.reject("Download cancelled");
-                        return;
-                    }
+                // Download tar.gz to temp file
+                File tempFile = new File(modelsDir, modelId + ".tar.gz.tmp");
+                downloadFile(entry.downloadUrl, tempFile, modelId, 0, 1);
 
-                    String filename = entry.files[i];
-                    File destFile = new File(modelDir, filename);
-
-                    if (destFile.exists() && destFile.length() > 1024) {
-                        emitProgress(modelId, filename, ((i + 1) * 100) / totalFiles);
-                        continue;
-                    }
-
-                    String subdir = entry.hfSubdir != null ? entry.hfSubdir : "";
-                    String fileUrl = "https://huggingface.co/" + entry.hfRepo +
-                        "/resolve/main/" + subdir + filename;
-
-                    downloadFile(fileUrl, destFile, hfToken, modelId, filename,
-                        i, totalFiles);
+                if (cancelRequested.get()) {
+                    tempFile.delete();
+                    emitProgress(modelId, "cancelled", 0);
+                    call.reject("Download cancelled");
+                    return;
                 }
 
-                // Also download tokenizer files for Qwen3 models
-                if (modelId.startsWith("qwen3-tts")) {
-                    downloadQwen3Tokenizer(modelDir, hfToken, modelId);
-                }
+                // Extract tar.gz
+                emitProgress(modelId, "extracting", 95);
+                extractTarGz(tempFile, modelsDir);
+                tempFile.delete();
 
                 emitProgress(modelId, "complete", 100);
 
@@ -328,46 +357,50 @@ public class ModelManagerPlugin extends Plugin {
 
     // ── Bundled model extraction ────────────────────────────────
 
-    private void extractBundledModelsIfNeeded() {
-        for (ModelEntry entry : KNOWN_MODELS) {
-            if (entry.bundled) {
-                File modelsDir = getModelsDir();
-                if (!isModelDownloaded(modelsDir, entry)) {
-                    try {
-                        extractBundledModel(entry);
-                    } catch (Exception e) {
-                        Log.e(TAG, "Failed to extract bundled model " + entry.id, e);
-                    }
-                }
-            }
-        }
-    }
-
     private void extractBundledModel(ModelEntry entry) throws IOException {
         AssetManager assets = getContext().getAssets();
         File modelsDir = getModelsDir();
         File modelDir = new File(modelsDir, entry.id);
 
         if (!modelDir.exists()) {
-            modelDir.mkdirs();
+            boolean created = modelDir.mkdirs();
+            Log.i(TAG, "Created model dir: " + modelDir.getAbsolutePath() + " success=" + created);
         }
 
         String assetBase = "models/" + entry.id;
+
+        // Log available assets for this model
+        try {
+            String[] assetFiles = assets.list(assetBase);
+            Log.i(TAG, "Assets in " + assetBase + ": " +
+                (assetFiles != null ? String.join(", ", assetFiles) : "null/empty"));
+        } catch (Exception e) {
+            Log.e(TAG, "Cannot list assets for " + assetBase + ": " + e.getMessage());
+        }
 
         // Copy ONNX files and tokenizer
         for (String filename : entry.files) {
             File destFile = new File(modelDir, filename);
             if (destFile.exists() && destFile.length() > 1024) {
-                continue; // Already extracted
+                Log.i(TAG, "  skip (exists): " + filename + " (" + destFile.length() + " bytes)");
+                continue;
             }
+            Log.i(TAG, "  extracting: " + assetBase + "/" + filename + " → " + destFile.getAbsolutePath());
             copyAssetFile(assets, assetBase + "/" + filename, destFile);
+            long size = destFile.length();
+            Log.i(TAG, "  extracted: " + filename + " (" + size + " bytes)");
+            if (size < 1024) {
+                Log.w(TAG, "  WARNING: " + filename + " is only " + size +
+                    " bytes — may be a Git LFS pointer, not a real model file!");
+            }
         }
 
         // Copy embeddings directory (for pocket-tts voices)
+        Log.i(TAG, "  extracting embeddings_v2/ ...");
         copyAssetDirectory(assets, assetBase + "/embeddings_v2",
             new File(modelDir, "embeddings_v2"));
 
-        Log.i(TAG, "Extracted bundled model: " + entry.id);
+        Log.i(TAG, "Extracted bundled model: " + entry.id + " to " + modelDir.getAbsolutePath());
     }
 
     private void copyAssetFile(AssetManager assets, String assetPath,
@@ -410,20 +443,119 @@ public class ModelManagerPlugin extends Plugin {
         }
     }
 
-    // ── Qwen3 tokenizer download ────────────────────────────────
+    // ── Tar.gz extraction ───────────────────────────────────────
 
-    private void downloadQwen3Tokenizer(File modelDir, String hfToken,
-                                         String modelId) throws Exception {
-        for (String filename : QWEN3_TOKENIZER_FILES) {
-            File destFile = new File(modelDir, filename);
-            if (destFile.exists() && destFile.length() > 100) {
-                continue;
+    /**
+     * Extract a tar.gz archive to a destination directory.
+     * Implements a minimal tar parser — handles regular files and directories.
+     */
+    private void extractTarGz(File tarGzFile, File destDir) throws IOException {
+        try (InputStream fis = new java.io.FileInputStream(tarGzFile);
+             BufferedInputStream bis = new BufferedInputStream(fis, 65536);
+             GZIPInputStream gzis = new GZIPInputStream(bis, 65536)) {
+
+            byte[] header = new byte[512];
+
+            while (true) {
+                int totalRead = 0;
+                while (totalRead < 512) {
+                    int n = gzis.read(header, totalRead, 512 - totalRead);
+                    if (n < 0) {
+                        if (totalRead == 0) return; // clean EOF
+                        break;
+                    }
+                    totalRead += n;
+                }
+                if (totalRead < 512) break;
+
+                // Check for end-of-archive (zero block)
+                boolean allZero = true;
+                for (byte b : header) {
+                    if (b != 0) { allZero = false; break; }
+                }
+                if (allZero) break;
+
+                // Parse tar header
+                String name = parseTarString(header, 0, 100);
+                long size = parseTarOctal(header, 124, 12);
+                byte typeFlag = header[156];
+
+                // Handle USTAR prefix (bytes 345-500)
+                String prefix = parseTarString(header, 345, 155);
+                if (!prefix.isEmpty()) {
+                    name = prefix + "/" + name;
+                }
+
+                // Security: prevent path traversal
+                if (name.contains("..")) {
+                    Log.w(TAG, "Skipping path with ..: " + name);
+                    skipBytes(gzis, roundUp512(size));
+                    continue;
+                }
+
+                File destFile = new File(destDir, name);
+
+                if (typeFlag == '5' || name.endsWith("/")) {
+                    // Directory
+                    destFile.mkdirs();
+                } else if (typeFlag == '0' || typeFlag == 0) {
+                    // Regular file
+                    if (destFile.getParentFile() != null) {
+                        destFile.getParentFile().mkdirs();
+                    }
+                    try (FileOutputStream fos = new FileOutputStream(destFile)) {
+                        long remaining = size;
+                        byte[] buf = new byte[8192];
+                        while (remaining > 0) {
+                            int toRead = (int) Math.min(buf.length, remaining);
+                            int n = gzis.read(buf, 0, toRead);
+                            if (n < 0) break;
+                            fos.write(buf, 0, n);
+                            remaining -= n;
+                        }
+                    }
+                    // Skip padding to 512-byte boundary
+                    long padding = roundUp512(size) - size;
+                    skipBytes(gzis, padding);
+                } else {
+                    // Skip unknown entry types (symlinks, etc.)
+                    skipBytes(gzis, roundUp512(size));
+                }
             }
+        }
+        Log.i(TAG, "Extracted tar.gz to " + destDir.getAbsolutePath());
+    }
 
-            String fileUrl = "https://huggingface.co/" + QWEN3_TOKENIZER_REPO +
-                "/resolve/main/" + QWEN3_TOKENIZER_SUBDIR + filename;
+    private static String parseTarString(byte[] header, int offset, int length) {
+        int end = offset;
+        while (end < offset + length && header[end] != 0) {
+            end++;
+        }
+        return new String(header, offset, end - offset).trim();
+    }
 
-            downloadFile(fileUrl, destFile, hfToken, modelId, filename, 0, 1);
+    private static long parseTarOctal(byte[] header, int offset, int length) {
+        String s = parseTarString(header, offset, length).trim();
+        if (s.isEmpty()) return 0;
+        try {
+            return Long.parseLong(s, 8);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    private static long roundUp512(long size) {
+        return ((size + 511) / 512) * 512;
+    }
+
+    private static void skipBytes(InputStream in, long count) throws IOException {
+        byte[] skip = new byte[8192];
+        long remaining = count;
+        while (remaining > 0) {
+            int toRead = (int) Math.min(skip.length, remaining);
+            int n = in.read(skip, 0, toRead);
+            if (n < 0) break;
+            remaining -= n;
         }
     }
 
@@ -444,12 +576,21 @@ public class ModelManagerPlugin extends Plugin {
 
     private boolean isModelDownloaded(File modelsDir, ModelEntry entry) {
         File modelDir = new File(modelsDir, entry.id);
-        if (!modelDir.isDirectory()) return false;
+        if (!modelDir.isDirectory()) {
+            Log.d(TAG, "isModelDownloaded(" + entry.id + "): dir not found at " + modelDir.getAbsolutePath());
+            return false;
+        }
 
-        // Check that all required ONNX files exist
+        // Check that all required files exist with reasonable sizes
         for (String filename : entry.files) {
             File f = new File(modelDir, filename);
-            if (!f.exists() || f.length() < 1024) {
+            if (!f.exists()) {
+                Log.d(TAG, "isModelDownloaded(" + entry.id + "): missing " + filename);
+                return false;
+            }
+            if (f.length() < 1024) {
+                Log.d(TAG, "isModelDownloaded(" + entry.id + "): " + filename +
+                    " too small (" + f.length() + " bytes, probably LFS pointer)");
                 return false;
             }
         }
@@ -469,19 +610,15 @@ public class ModelManagerPlugin extends Plugin {
         }
     }
 
-    private void downloadFile(String urlString, File destFile, String hfToken,
-                              String modelId, String filename,
-                              int fileIndex, int totalFiles) throws Exception {
+    private void downloadFile(String urlString, File destFile,
+                              String modelId, int fileIndex,
+                              int totalFiles) throws Exception {
         URL url = new URL(urlString);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("GET");
         conn.setConnectTimeout(30000);
         conn.setReadTimeout(60000);
         conn.setInstanceFollowRedirects(true);
-
-        if (hfToken != null && !hfToken.isEmpty()) {
-            conn.setRequestProperty("Authorization", "Bearer " + hfToken);
-        }
 
         // Resume support
         long existingBytes = 0;
@@ -509,7 +646,7 @@ public class ModelManagerPlugin extends Plugin {
         if (responseCode != HttpURLConnection.HTTP_OK &&
             responseCode != HttpURLConnection.HTTP_PARTIAL) {
             conn.disconnect();
-            throw new Exception("HTTP " + responseCode + " for " + filename);
+            throw new Exception("HTTP " + responseCode + " for " + urlString);
         }
 
         long totalBytes = conn.getContentLengthLong() + existingBytes;
@@ -532,9 +669,10 @@ public class ModelManagerPlugin extends Plugin {
 
                 double fileProgress = totalBytes > 0 ?
                     (double) downloaded / totalBytes : 0;
-                int overallPercent = (int) (((fileIndex + fileProgress) / totalFiles) * 100);
+                // Reserve last 10% for extraction
+                int overallPercent = (int) (fileProgress * 90);
 
-                emitProgress(modelId, filename, overallPercent);
+                emitProgress(modelId, urlString, overallPercent);
             }
         } finally {
             conn.disconnect();
@@ -573,14 +711,13 @@ public class ModelManagerPlugin extends Plugin {
         final boolean bundled;
         final String[][] voices;
         final String[] files;
-        final String hfRepo;
-        final String hfSubdir;
+        final String downloadUrl;
 
         ModelEntry(String id, String name, String size,
                    boolean supportsClone, boolean supportsVoicePrompt,
                    boolean supportsVoiceDesign, boolean bundled,
                    String[][] voices, String[] files,
-                   String hfRepo, String hfSubdir) {
+                   String downloadUrl) {
             this.id = id;
             this.name = name;
             this.size = size;
@@ -590,8 +727,7 @@ public class ModelManagerPlugin extends Plugin {
             this.bundled = bundled;
             this.voices = voices;
             this.files = files;
-            this.hfRepo = hfRepo;
-            this.hfSubdir = hfSubdir;
+            this.downloadUrl = downloadUrl;
         }
     }
 }
