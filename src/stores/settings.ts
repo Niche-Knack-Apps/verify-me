@@ -29,7 +29,6 @@ const STORAGE_KEY = 'verify-me-settings';
 
 interface PersistedSettings {
   theme: ThemeMode;
-  hfToken: string;
   forceCpu: boolean;
 }
 
@@ -39,13 +38,13 @@ function loadSettings(): PersistedSettings {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed.theme === 'modern' || parsed.theme === 'eighties') {
-        return { theme: parsed.theme, hfToken: parsed.hfToken ?? '', forceCpu: parsed.forceCpu ?? true };
+        return { theme: parsed.theme, forceCpu: parsed.forceCpu ?? true };
       }
     }
   } catch {
     // Ignore invalid storage
   }
-  return { theme: 'modern', hfToken: '', forceCpu: true };
+  return { theme: 'modern', forceCpu: true };
 }
 
 function saveSettings(settings: PersistedSettings) {
@@ -68,7 +67,6 @@ export const useSettingsStore = defineStore('settings', () => {
   const outputDirectory = ref('');
   const modelsDirectory = ref('');
   const theme = ref<ThemeMode>(persisted.theme);
-  const hfToken = ref(persisted.hfToken);
   const forceCpu = ref(persisted.forceCpu);
 
   const isEighties = computed(() => theme.value === 'eighties');
@@ -82,17 +80,12 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   function persistAll() {
-    saveSettings({ theme: theme.value, hfToken: hfToken.value, forceCpu: forceCpu.value });
+    saveSettings({ theme: theme.value, forceCpu: forceCpu.value });
   }
 
   function setTheme(mode: ThemeMode) {
     theme.value = mode;
     applyTheme();
-    persistAll();
-  }
-
-  function setHfToken(token: string) {
-    hfToken.value = token;
     persistAll();
   }
 
@@ -248,11 +241,9 @@ export const useSettingsStore = defineStore('settings', () => {
     outputDirectory,
     modelsDirectory,
     theme,
-    hfToken,
     forceCpu,
     isEighties,
     setTheme,
-    setHfToken,
     setForceCpu,
     toggleTheme,
     startEngine,

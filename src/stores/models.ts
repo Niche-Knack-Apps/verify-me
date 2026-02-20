@@ -29,11 +29,11 @@ export interface TTSModel {
   supportsVoiceDesign: boolean;
   voices: Voice[];
   downloadUrl?: string;
-  hfRepo?: string;
 }
 
 export const useModelsStore = defineStore('models', () => {
   const models = ref<TTSModel[]>([]);
+  const loading = ref(false);
   const loadError = ref<string | null>(null);
   const downloadProgress = ref<Record<string, number>>({});
   const downloading = ref<string | null>(null);
@@ -41,6 +41,7 @@ export const useModelsStore = defineStore('models', () => {
   const downloadFilename = ref<Record<string, string>>({});
 
   async function loadModels() {
+    loading.value = true;
     loadError.value = null;
     try {
       if (isCapacitor()) {
@@ -62,7 +63,7 @@ export const useModelsStore = defineStore('models', () => {
           supportsVoicePrompt: m.supportsVoicePrompt ?? false,
           supportsVoiceDesign: m.supportsVoiceDesign ?? false,
           voices: m.voices ?? [],
-          hfRepo: m.hfRepo,
+          downloadUrl: m.downloadUrl,
         }));
       } else {
         const { invoke } = await import('@tauri-apps/api/core');
@@ -74,6 +75,8 @@ export const useModelsStore = defineStore('models', () => {
       loadError.value = `Failed to load models: ${err.message}`;
       console.error('[models] Failed to load models:', err.message);
       console.error('[models] Stack:', err.stack);
+    } finally {
+      loading.value = false;
     }
   }
 
@@ -84,9 +87,15 @@ export const useModelsStore = defineStore('models', () => {
     );
     try {
       const ModelManager = await getModelManager();
-      await ModelManager.extractBundledModels();
+      const result = await ModelManager.extractBundledModels();
+      console.log('[models] extractBundledModels result:', JSON.stringify(result));
+      if (result.errors) {
+        console.error('[models] Extraction errors:', result.errors);
+        loadError.value = `Extraction: ${result.errors}`;
+      }
     } catch (e) {
-      console.error('Bundled extraction failed:', e);
+      console.error('[models] Bundled extraction failed:', e);
+      loadError.value = `Extraction failed: ${e instanceof Error ? e.message : String(e)}`;
       models.value = models.value.map(m =>
         m.status === 'extracting' ? { ...m, status: 'bundled' as const } : m
       );
@@ -94,10 +103,15 @@ export const useModelsStore = defineStore('models', () => {
     await loadModels();
   }
 
-  async function downloadModel(modelId: string, hfToken?: string) {
+  async function downloadModel(modelId: string) {
     const model = models.value.find(m => m.id === modelId);
     if (!model) {
       console.error('Model not found:', modelId);
+      return;
+    }
+
+    if (!model.downloadUrl) {
+      console.error('No download URL for model:', modelId);
       return;
     }
 
@@ -111,24 +125,10 @@ export const useModelsStore = defineStore('models', () => {
 
       if (isCapacitor()) {
         const ModelManager = await getModelManager();
-        await ModelManager.downloadModel({
-          modelId,
-          hfToken: hfToken || null,
-        });
+        await ModelManager.downloadModel({ modelId });
       } else {
         const { invoke } = await import('@tauri-apps/api/core');
-
-        if (model.hfRepo) {
-          await invoke('download_hf_model', {
-            repoId: model.hfRepo,
-            modelId,
-            token: hfToken || null,
-          });
-        } else if (model.downloadUrl) {
-          await invoke('download_model', { url: model.downloadUrl, filename: modelId });
-        } else {
-          throw new Error('No download source for model');
-        }
+        await invoke('download_model', { url: model.downloadUrl, modelId });
       }
 
       delete downloadProgress.value[modelId];
@@ -214,6 +214,7 @@ export const useModelsStore = defineStore('models', () => {
 
   return {
     models,
+    loading,
     loadError,
     downloadProgress,
     downloading,

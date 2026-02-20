@@ -50,7 +50,7 @@ async function startDownload(modelId: string) {
   downloadError.value = null;
   showLargeDownloadConfirm.value = null;
   try {
-    await modelsStore.downloadModel(modelId, settings.hfToken || undefined);
+    await modelsStore.downloadModel(modelId);
   } catch (e) {
     downloadError.value = String(e);
   }
@@ -112,28 +112,6 @@ onMounted(() => {
                   {{ settings.isEighties ? '[OPEN]' : 'Open' }}
                 </Button>
               </div>
-            </div>
-
-            <div>
-              <label class="config-label">HuggingFace Token</label>
-              <div class="hf-token-row">
-                <input
-                  :type="settings.isEighties ? 'text' : 'password'"
-                  :value="settings.hfToken"
-                  @input="settings.setHfToken(($event.target as HTMLInputElement).value)"
-                  class="hf-token-input"
-                  placeholder="hf_..."
-                />
-                <a
-                  href="https://huggingface.co/settings/tokens"
-                  target="_blank"
-                  class="action-link"
-                  title="Create a token at huggingface.co"
-                >
-                  {{ settings.isEighties ? '[?]' : 'Get token' }}
-                </a>
-              </div>
-              <p class="config-hint">Required to download Qwen 3 TTS model</p>
             </div>
 
             <div>
@@ -206,7 +184,7 @@ onMounted(() => {
                     </button>
                     <!-- Delete button -->
                     <button
-                      v-else-if="model.status === 'available' && (model.downloadUrl || model.hfRepo)"
+                      v-else-if="model.status === 'available' && model.downloadUrl"
                       class="action-link action-link--danger"
                       @click="modelsStore.deleteModel(model.id)"
                     >
@@ -685,39 +663,6 @@ onMounted(() => {
 
 .config-value--off {
   color: var(--app-muted);
-}
-
-.hf-token-row {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-.hf-token-input {
-  flex: 1;
-  padding: 0.375rem 0.5rem;
-  min-height: 36px;
-  font-family: var(--app-font);
-  font-size: 0.8125rem;
-  background: var(--app-bg);
-  color: var(--app-text);
-  border: 1px solid var(--app-border);
-  border-radius: var(--app-radius);
-  caret-color: var(--app-accent);
-}
-.hf-token-input:focus {
-  outline: none;
-  border-color: var(--app-accent);
-  box-shadow: var(--app-focus-ring);
-}
-.hf-token-input::placeholder {
-  color: var(--app-muted);
-}
-
-[data-theme="eighties"] .hf-token-input {
-  font-size: 16px;
-  border-radius: 0;
-  text-shadow: var(--app-glow);
 }
 
 .config-hint {
