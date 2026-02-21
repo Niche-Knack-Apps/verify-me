@@ -137,6 +137,10 @@ export class DebugLogger {
         const saved = await this._tauriSaveFile(content, filename);
         if (saved) return { success: true, filename: saved };
         return { success: false, error: 'Save cancelled' };
+      } else if ('Capacitor' in window) {
+        const saved = await this._capacitorSaveFile(content, filename);
+        if (saved) return { success: true, filename: saved };
+        return { success: false, error: 'Save failed' };
       } else {
         this._blobDownload(content, filename);
         return { success: true, filename };
@@ -164,6 +168,35 @@ export class DebugLogger {
       this._originalConsole.error('[DebugLogger] Tauri save failed:', error);
       this._blobDownload(content, defaultFilename);
       return defaultFilename;
+    }
+  }
+
+  private async _capacitorSaveFile(content: string, filename: string): Promise<string | null> {
+    try {
+      const { Filesystem, Directory } = await import('@capacitor/filesystem');
+      await Filesystem.writeFile({
+        path: `Download/${filename}`,
+        data: content,
+        directory: Directory.ExternalStorage,
+        recursive: true,
+      });
+      return `Download/${filename}`;
+    } catch {
+      // ExternalStorage may not be available, try Documents
+      try {
+        const { Filesystem, Directory } = await import('@capacitor/filesystem');
+        await Filesystem.writeFile({
+          path: filename,
+          data: content,
+          directory: Directory.Documents,
+        });
+        return `Documents/${filename}`;
+      } catch (error) {
+        this._originalConsole.error('[DebugLogger] Capacitor save failed:', error);
+        // Last resort: try blob download
+        this._blobDownload(content, filename);
+        return filename;
+      }
     }
   }
 

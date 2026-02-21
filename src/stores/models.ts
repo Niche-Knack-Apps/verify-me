@@ -47,7 +47,15 @@ export const useModelsStore = defineStore('models', () => {
       if (isCapacitor()) {
         const ModelManager = await getModelManager();
         console.log('[models] Calling ModelManager.listModels...');
-        const result = await ModelManager.listModels();
+
+        // Timeout guard: if plugin doesn't respond in 10s, fail gracefully
+        const result = await Promise.race([
+          ModelManager.listModels(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Plugin timeout — ModelManager.listModels() did not respond in 10s')), 10000)
+          ),
+        ]) as any;
+
         console.log('[models] listModels raw result:', JSON.stringify(result));
         const raw = result.models ?? [];
         if (raw.length === 0) {
