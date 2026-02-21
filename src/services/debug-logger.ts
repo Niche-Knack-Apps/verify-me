@@ -113,19 +113,29 @@ export class DebugLogger {
   async getLogs(options: GetLogsOptions = {}): Promise<LogEntry[]> {
     const { limit = 1000, level = null, sessionId = null } = options;
     if (!this.db) return this.sessionLogs;
-    return new Promise((resolve, reject) => {
-      const tx = this.db!.transaction(this.config.storeName, 'readonly');
-      const store = tx.objectStore(this.config.storeName);
-      const request = store.getAll();
-      request.onsuccess = () => {
-        let logs: LogEntry[] = request.result || [];
-        if (level) logs = logs.filter((l) => l.level === level);
-        if (sessionId) logs = logs.filter((l) => l.sessionId === sessionId);
-        logs = logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, limit);
-        resolve(logs);
-      };
-      request.onerror = () => reject(request.error);
-    });
+
+    // Merge IndexedDB (previous sessions) with sessionLogs (current session, always complete).
+    // Fire-and-forget persist from console interception can lose entries in IndexedDB,
+    // but sessionLogs always has the full current session.
+    let logs: LogEntry[];
+    try {
+      const dbLogs = await new Promise<LogEntry[]>((resolve, reject) => {
+        const tx = this.db!.transaction(this.config.storeName, 'readonly');
+        const store = tx.objectStore(this.config.storeName);
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => reject(request.error);
+      });
+      const prevSessionLogs = dbLogs.filter(l => l.sessionId !== this.sessionId);
+      logs = [...prevSessionLogs, ...this.sessionLogs];
+    } catch {
+      logs = [...this.sessionLogs];
+    }
+
+    if (level) logs = logs.filter((l) => l.level === level);
+    if (sessionId) logs = logs.filter((l) => l.sessionId === sessionId);
+    logs = logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, limit);
+    return logs;
   }
 
   async downloadLogs(): Promise<{ success: boolean; filename?: string; error?: string }> {

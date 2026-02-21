@@ -1,20 +1,22 @@
 /**
  * Shared Capacitor plugin registry.
- * Each plugin is registered exactly once and cached for reuse across all stores.
+ * Uses a promise lock so concurrent callers share one registration.
  */
 
-let _plugins: Record<string, any> | null = null;
+let _pluginsPromise: Promise<Record<string, any>> | null = null;
 
-async function ensurePlugins(): Promise<Record<string, any>> {
-  if (!_plugins) {
-    const { registerPlugin } = await import('@capacitor/core');
-    _plugins = {
-      ModelManager: registerPlugin('ModelManager'),
-      TTSEngine: registerPlugin('TTSEngine'),
-      AudioRecorder: registerPlugin('AudioRecorder'),
-    };
+function ensurePlugins(): Promise<Record<string, any>> {
+  if (!_pluginsPromise) {
+    _pluginsPromise = (async () => {
+      const { registerPlugin } = await import('@capacitor/core');
+      return {
+        ModelManager: registerPlugin('ModelManager'),
+        TTSEngine: registerPlugin('TTSEngine'),
+        AudioRecorder: registerPlugin('AudioRecorder'),
+      };
+    })();
   }
-  return _plugins;
+  return _pluginsPromise;
 }
 
 export async function getModelManager(): Promise<any> {
