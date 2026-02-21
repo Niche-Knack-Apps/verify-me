@@ -173,22 +173,24 @@ export class DebugLogger {
 
   private async _capacitorSaveFile(content: string, filename: string): Promise<string | null> {
     try {
-      const { Filesystem, Directory } = await import('@capacitor/filesystem');
+      const { Filesystem, Directory, Encoding } = await import('@capacitor/filesystem');
       await Filesystem.writeFile({
         path: `Download/${filename}`,
         data: content,
         directory: Directory.ExternalStorage,
+        encoding: Encoding.UTF8,
         recursive: true,
       });
       return `Download/${filename}`;
     } catch {
       // ExternalStorage may not be available, try Documents
       try {
-        const { Filesystem, Directory } = await import('@capacitor/filesystem');
+        const { Filesystem, Directory, Encoding } = await import('@capacitor/filesystem');
         await Filesystem.writeFile({
           path: filename,
           data: content,
           directory: Directory.Documents,
+          encoding: Encoding.UTF8,
         });
         return `Documents/${filename}`;
       } catch (error) {
