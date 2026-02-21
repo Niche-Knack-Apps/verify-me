@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import android.util.Log;
 
 /**
  * ONNX inference engine for pocket-tts model.
@@ -80,7 +81,7 @@ public class PocketTTSInference {
         enum Type { F32, I64, BOOL }
 
         final Type type;
-        final long[] shape;
+        long[] shape; // mutable for in-place state updates
         float[] floatData;   // for F32
         long[] longData;     // for I64
         boolean[] boolData;  // for BOOL
@@ -224,28 +225,55 @@ public class PocketTTSInference {
 
     public void initialize(File modelDir) throws Exception {
         this.modelDir = modelDir;
+        Log.d(TAG, "Initializing pocket-tts from: " + modelDir.getAbsolutePath());
+        logMemory("before-init");
 
         SessionOptions opts = new SessionOptions();
         opts.setOptimizationLevel(SessionOptions.OptLevel.ALL_OPT);
-        opts.setIntraOpNumThreads(4);
+        opts.setIntraOpNumThreads(2);
 
+        Log.d(TAG, "Loading text_conditioner.onnx...");
         textConditioner = env.createSession(
             new File(modelDir, "text_conditioner.onnx").getAbsolutePath(), opts);
+        logMemory("after-text_conditioner");
+
+        Log.d(TAG, "Loading mimi_encoder.onnx...");
         mimiEncoder = env.createSession(
             new File(modelDir, "mimi_encoder.onnx").getAbsolutePath(), opts);
+        logMemory("after-mimi_encoder");
+
+        Log.d(TAG, "Loading flow_lm_main_int8.onnx...");
         flowLmMain = env.createSession(
             new File(modelDir, "flow_lm_main_int8.onnx").getAbsolutePath(), opts);
+        logMemory("after-flow_lm_main");
+
+        Log.d(TAG, "Loading flow_lm_flow_int8.onnx...");
         flowLmFlow = env.createSession(
             new File(modelDir, "flow_lm_flow_int8.onnx").getAbsolutePath(), opts);
+        logMemory("after-flow_lm_flow");
+
+        Log.d(TAG, "Loading mimi_decoder_int8.onnx...");
         mimiDecoder = env.createSession(
             new File(modelDir, "mimi_decoder_int8.onnx").getAbsolutePath(), opts);
+        logMemory("after-mimi_decoder");
 
+        Log.d(TAG, "Loading tokenizer...");
         loadTokenizer(new File(modelDir, "tokenizer.model"));
+
+        logMemory("after-init");
+        Log.d(TAG, "Pocket-TTS initialized successfully, vocab size: " + vocab.size());
         initialized = true;
     }
 
     public boolean isInitialized() {
         return initialized;
+    }
+
+    private void logMemory(String label) {
+        Runtime rt = Runtime.getRuntime();
+        long used = (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024);
+        long max = rt.maxMemory() / (1024 * 1024);
+        Log.d(TAG, String.format("[Memory %s] used=%dMB max=%dMB", label, used, max));
     }
 
     // ── Public API ──────────────────────────────────────────────
@@ -269,36 +297,64 @@ public class PocketTTSInference {
             throw new IllegalStateException("Model not initialized");
         }
 
+        Log.d(TAG, "generateSpeech: text='" + text.substring(0, Math.min(text.length(), 50))
+            + "' voice=" + voiceId + " speed=" + speed);
+        logMemory("gen-start");
+        long t0 = System.currentTimeMillis();
+
         // 1. Prepare text
         String prepared = prepareText(text);
         int maxGenFrames = computeMaxFrames(prepared);
         int framesAfterEos = computeFramesAfterEos(prepared);
+        Log.d(TAG, "  prepared text: '" + prepared.substring(0, Math.min(prepared.length(), 50))
+            + "' maxFrames=" + maxGenFrames + " framesAfterEos=" + framesAfterEos);
 
         // 2. Tokenize
         long[] tokenIds = tokenize(prepared);
+        Log.d(TAG, "  tokenized: " + tokenIds.length + " tokens");
 
         // 3. Run text conditioner -> text embeddings [1, T, 1024] (flat)
+        Log.d(TAG, "  running text_conditioner...");
         float[] textEmbeddings = runTextConditioner(tokenIds);
         int textLen = tokenIds.length;
+        Log.d(TAG, "  text_conditioner done, embeddings: " + textEmbeddings.length + " floats");
+        logMemory("after-text-cond");
 
         // 4. Initialize flow_lm states and load voice
+        Log.d(TAG, "  loading voice: " + voiceId);
         List<StateValue> flowStates = initFlowLmStates();
         Map<String, TensorData> voiceTensors = loadVoiceEmbedding(voiceId);
         loadVoiceIntoStates(flowStates, voiceTensors);
+        voiceTensors = null; // free voice data
+        Log.d(TAG, "  voice loaded into states");
+        logMemory("after-voice-load");
 
         // 5. Text conditioning pass: process text through backbone, updating KV cache
+        Log.d(TAG, "  running conditioning pass...");
         FlowLmResult condResult = runFlowLmStep(
             new float[0], 0,       // empty sequence
             textEmbeddings, textLen,
-            flowStates
+            flowStates, false
         );
         flowStates = condResult.states;
+        textEmbeddings = null; // free text embeddings
+        Log.d(TAG, "  conditioning pass done");
+        logMemory("after-cond-pass");
 
         // 6. Autoregressive generation
+        Log.d(TAG, "  starting AR generation...");
         List<float[]> latents = autoregressiveGenerate(flowStates, maxGenFrames, framesAfterEos);
+        flowStates = null; // free states
+        Log.d(TAG, "  AR generation done: " + latents.size() + " frames");
+        logMemory("after-ar-gen");
 
         // 7. Decode latents to audio
+        Log.d(TAG, "  decoding " + latents.size() + " latent frames...");
         float[] audio = decodeLatents(latents);
+        latents = null; // free latents
+        Log.d(TAG, "  decoded: " + audio.length + " samples (" +
+            String.format("%.1f", audio.length / (float) SAMPLE_RATE) + "s)");
+        logMemory("after-decode");
 
         // 8. Speed adjustment
         if (Math.abs(speed - 1.0f) > 0.01f) {
@@ -307,6 +363,9 @@ public class PocketTTSInference {
 
         // 9. Write WAV
         writeWav(audio, SAMPLE_RATE, outputFile);
+        long elapsed = System.currentTimeMillis() - t0;
+        Log.d(TAG, "generateSpeech completed in " + elapsed + "ms -> " + outputFile.getAbsolutePath());
+        logMemory("gen-done");
     }
 
     /**
@@ -327,21 +386,30 @@ public class PocketTTSInference {
             throw new IllegalStateException("Model not initialized");
         }
 
+        Log.d(TAG, "cloneVoice: text='" + text.substring(0, Math.min(text.length(), 50))
+            + "' ref=" + referenceAudio.getName());
+        logMemory("clone-start");
+        long t0 = System.currentTimeMillis();
+
         // 1. Prepare text + tokenize + text conditioner
         String prepared = prepareText(text);
         int maxGenFrames = computeMaxFrames(prepared);
         int framesAfterEos = computeFramesAfterEos(prepared);
 
         long[] tokenIds = tokenize(prepared);
+        Log.d(TAG, "  tokenized: " + tokenIds.length + " tokens");
         float[] textEmbeddings = runTextConditioner(tokenIds);
         int textLen = tokenIds.length;
 
         // 2. Load + validate reference audio
+        Log.d(TAG, "  loading reference audio...");
         float[] refSamples = loadAudioSamples(referenceAudio);
         if (refSamples.length == 0) {
             throw new Exception("Reference audio is empty");
         }
         float originalDuration = refSamples.length / (float) SAMPLE_RATE;
+        Log.d(TAG, "  ref audio: " + refSamples.length + " samples ("
+            + String.format("%.1f", originalDuration) + "s)");
         if (originalDuration < MIN_REFERENCE_SECONDS) {
             throw new Exception(String.format(
                 "Reference audio too short (%.1fs) - need at least %.0fs",
@@ -352,18 +420,22 @@ public class PocketTTSInference {
         refSamples = selectBestAudioWindow(refSamples, SAMPLE_RATE);
 
         // 3. Encode reference audio via mimi_encoder -> audio conditioning [1, T', 1024]
+        Log.d(TAG, "  encoding reference audio...");
         EncodeResult encResult = encodeReferenceAudio(refSamples);
         float[] audioConditioning = encResult.data;
         int audioCondLen = encResult.numFrames;
+        Log.d(TAG, "  encoded: " + audioCondLen + " frames");
+        logMemory("after-ref-encode");
 
         // 4. Initialize fresh flow_lm states (no predefined voice)
         List<StateValue> flowStates = initFlowLmStates();
 
         // 5. Voice conditioning pass: audio conditioning through backbone
+        Log.d(TAG, "  running voice conditioning pass...");
         FlowLmResult voiceCondResult = runFlowLmStep(
             new float[0], 0,                  // empty sequence
             audioConditioning, audioCondLen,   // audio conditioning as text_embeddings
-            flowStates
+            flowStates, false
         );
         flowStates = voiceCondResult.states;
 
@@ -372,20 +444,29 @@ public class PocketTTSInference {
         refSamples = null;
 
         // 6. Text conditioning pass
+        Log.d(TAG, "  running text conditioning pass...");
         FlowLmResult textCondResult = runFlowLmStep(
             new float[0], 0,            // empty sequence
             textEmbeddings, textLen,
-            flowStates
+            flowStates, false
         );
         flowStates = textCondResult.states;
 
         // Free text embeddings before generation loop
         textEmbeddings = null;
+        logMemory("after-cond-passes");
 
         // 7. AR generation + decode + write WAV
+        Log.d(TAG, "  starting AR generation...");
         List<float[]> latents = autoregressiveGenerate(flowStates, maxGenFrames, framesAfterEos);
+        flowStates = null;
+        Log.d(TAG, "  AR done: " + latents.size() + " frames, decoding...");
         float[] audio = decodeLatents(latents);
+        latents = null;
         writeWav(audio, SAMPLE_RATE, outputFile);
+        long elapsed = System.currentTimeMillis() - t0;
+        Log.d(TAG, "cloneVoice completed in " + elapsed + "ms -> " + outputFile.getAbsolutePath());
+        logMemory("clone-done");
     }
 
     public List<String> getAvailableVoices() {
@@ -547,6 +628,51 @@ public class PocketTTSInference {
             }
         }
         return states;
+    }
+
+    /**
+     * Update flow_lm states IN-PLACE from session output.
+     * Reuses existing float[]/long[] buffers to avoid ~48MB/step allocation.
+     * Critical for Android memory management.
+     */
+    private void updateFlowLmStates(Result result, int offset,
+                                     List<StateValue> states) throws OrtException {
+        for (int i = 0; i < 18; i++) {
+            int idx = offset + i;
+            int stateType = i % 3;
+            StateValue sv = states.get(i);
+            OnnxTensor tensor = (OnnxTensor) result.get(idx);
+            long[] newShape = tensor.getInfo().getShape();
+
+            if (stateType == 0 || stateType == 1) {
+                // Float state (cache or current_end)
+                long numElements = 1;
+                boolean hasZero = false;
+                for (long d : newShape) {
+                    if (d <= 0) { hasZero = true; break; }
+                    numElements *= d;
+                }
+                if (hasZero || numElements == 0) {
+                    if (sv.floatData.length != 0) sv.floatData = new float[0];
+                } else {
+                    FloatBuffer buf = tensor.getFloatBuffer();
+                    int remaining = buf.remaining();
+                    if (sv.floatData.length != remaining) {
+                        sv.floatData = new float[remaining];
+                    }
+                    buf.get(sv.floatData);
+                }
+            } else {
+                // Int64 state (step)
+                LongBuffer buf = tensor.getLongBuffer();
+                int remaining = buf.remaining();
+                if (sv.longData.length != remaining) {
+                    sv.longData = new long[remaining];
+                }
+                buf.get(sv.longData);
+            }
+            sv.shape = newShape;
+        }
     }
 
     // ── Mimi decoder state management ───────────────────────────
@@ -778,7 +904,8 @@ public class PocketTTSInference {
      */
     private FlowLmResult runFlowLmStep(float[] sequenceData, int seqLen,
                                         float[] textEmbData, int textLen,
-                                        List<StateValue> states) throws Exception {
+                                        List<StateValue> states,
+                                        boolean reuseStates) throws Exception {
         List<OnnxTensor> toClose = new ArrayList<>();
         try {
             Map<String, OnnxTensor> inputs = new LinkedHashMap<>();
@@ -831,7 +958,13 @@ public class PocketTTSInference {
                 float eosLogit = eosBuf.get();
 
                 // Extract updated states (outputs 2..19)
-                List<StateValue> newStates = extractFlowLmStates(result, 2);
+                List<StateValue> newStates;
+                if (reuseStates) {
+                    updateFlowLmStates(result, 2, states);
+                    newStates = states;
+                } else {
+                    newStates = extractFlowLmStates(result, 2);
+                }
 
                 return new FlowLmResult(conditioning, eosLogit, newStates);
             }
@@ -911,20 +1044,26 @@ public class PocketTTSInference {
         float[] backboneInput = new float[LATENT_DIM];
         Arrays.fill(backboneInput, Float.NaN);
 
+        // Pre-allocate empty text embeddings (reused every step)
+        float[] emptyText = new float[0];
+
         Integer eosStep = null;
 
         for (int step = 0; step < maxFrames; step++) {
             // Run flow_lm_main with backbone input [1, 1, 32]
+            // reuseStates=true: update state buffers in-place to avoid ~48MB/step allocation
             FlowLmResult result = runFlowLmStep(
                 backboneInput, 1,   // seq_len = 1
-                new float[0], 0,    // empty text embeddings, text_len = 0
-                flowStates
+                emptyText, 0,       // empty text embeddings, text_len = 0
+                flowStates, true    // in-place state update
             );
-            flowStates = result.states;
+            // flowStates is updated in-place, no reassignment needed
 
             // Check EOS
             if (result.eosLogit > EOS_THRESHOLD && eosStep == null) {
                 eosStep = step;
+                Log.d(TAG, "  AR EOS detected at step " + step + " (logit=" +
+                    String.format("%.2f", result.eosLogit) + ")");
             }
             if (eosStep != null && step >= eosStep + framesAfterEos) {
                 break;
@@ -934,6 +1073,12 @@ public class PocketTTSInference {
             float[] latent = runFlowMatching(result.conditioning);
             latents.add(latent);
             backboneInput = latent;
+
+            // Log progress every 10 steps
+            if (step % 10 == 0) {
+                Log.d(TAG, "  AR step " + step + "/" + maxFrames +
+                    " eos=" + String.format("%.2f", result.eosLogit));
+            }
         }
 
         return latents;
@@ -951,7 +1096,11 @@ public class PocketTTSInference {
         }
 
         List<StateValue> mimiStates = initMimiStates(mimiDecoder);
-        List<Float> audioSamples = new ArrayList<>();
+
+        // Use primitive float[] instead of List<Float> to avoid boxing overhead (4x memory)
+        int estimatedSamples = latents.size() * 480; // ~480 samples per frame at 24kHz
+        float[] audioBuffer = new float[estimatedSamples];
+        int audioLen = 0;
 
         for (int i = 0; i < latents.size(); i++) {
             float[] latent = latents.get(i);
@@ -980,9 +1129,15 @@ public class PocketTTSInference {
                     // Extract audio frame [1, 1, N]
                     OnnxTensor audioTensor = (OnnxTensor) result.get(0);
                     FloatBuffer buf = audioTensor.getFloatBuffer();
-                    while (buf.hasRemaining()) {
-                        audioSamples.add(buf.get());
+                    int remaining = buf.remaining();
+
+                    // Grow buffer if needed
+                    if (audioLen + remaining > audioBuffer.length) {
+                        audioBuffer = Arrays.copyOf(audioBuffer,
+                            Math.max(audioBuffer.length * 2, audioLen + remaining));
                     }
+                    buf.get(audioBuffer, audioLen, remaining);
+                    audioLen += remaining;
 
                     // Extract updated states (output 1 onward)
                     mimiStates = extractMimiStates(result, 1, mimiStates);
@@ -992,14 +1147,15 @@ public class PocketTTSInference {
                     try { t.close(); } catch (Exception e) { /* ignore */ }
                 }
             }
+
+            // Log progress every 10 frames
+            if (i % 10 == 0) {
+                Log.d(TAG, "  decode frame " + i + "/" + latents.size());
+            }
         }
 
-        // Convert List<Float> to float[]
-        float[] audio = new float[audioSamples.size()];
-        for (int i = 0; i < audioSamples.size(); i++) {
-            audio[i] = audioSamples.get(i);
-        }
-        return audio;
+        Log.d(TAG, "  decode complete: " + audioLen + " samples");
+        return Arrays.copyOfRange(audioBuffer, 0, audioLen);
     }
 
     // ── Text preparation (matching Rust prepare_text) ───────────

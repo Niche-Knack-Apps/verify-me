@@ -1,5 +1,6 @@
 package com.nicheknack.verifyme;
 
+import android.util.Log;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -13,6 +14,8 @@ import java.util.concurrent.Executors;
 
 @CapacitorPlugin(name = "TTSEngine")
 public class TTSEnginePlugin extends Plugin {
+
+    private static final String TAG = "TTSEngine";
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private PocketTTSInference pocketTTS = null;
@@ -29,6 +32,8 @@ public class TTSEnginePlugin extends Plugin {
             return;
         }
 
+        Log.d(TAG, "initialize: modelId=" + modelId);
+
         executor.submit(() -> {
             try {
                 // Shutdown any existing engine
@@ -38,12 +43,15 @@ public class TTSEnginePlugin extends Plugin {
                 File modelDir = new File(modelsDir, modelId);
 
                 if (!modelDir.isDirectory()) {
+                    Log.e(TAG, "Model directory not found: " + modelDir.getAbsolutePath());
                     JSObject ret = new JSObject();
                     ret.put("success", false);
                     ret.put("error", "Model not downloaded: " + modelId);
                     call.resolve(ret);
                     return;
                 }
+
+                Log.d(TAG, "Model dir: " + modelDir.getAbsolutePath());
 
                 if (modelId.equals("pocket-tts")) {
                     pocketTTS = new PocketTTSInference();
@@ -62,12 +70,14 @@ public class TTSEnginePlugin extends Plugin {
                 currentModelId = modelId;
                 engineRunning = true;
 
+                Log.d(TAG, "Engine initialized successfully: " + modelId);
                 JSObject ret = new JSObject();
                 ret.put("success", true);
                 ret.put("modelId", modelId);
                 call.resolve(ret);
 
-            } catch (Exception e) {
+            } catch (Throwable e) {
+                Log.e(TAG, "Failed to initialize: " + e.getMessage(), e);
                 engineRunning = false;
                 JSObject ret = new JSObject();
                 ret.put("success", false);
@@ -93,6 +103,9 @@ public class TTSEnginePlugin extends Plugin {
             return;
         }
 
+        Log.d(TAG, "generateSpeech: text='" + text.substring(0, Math.min(text.length(), 50))
+            + "' voice=" + voice + " speed=" + speed);
+
         executor.submit(() -> {
             try {
                 File outputDir = new File(getContext().getCacheDir(), "output");
@@ -108,16 +121,21 @@ public class TTSEnginePlugin extends Plugin {
                 } else if (qwen3TTS != null && qwen3TTS.isInitialized()) {
                     qwen3TTS.generateSpeech(text, voice, speed, outputFile);
                 } else {
+                    Log.e(TAG, "No model loaded");
                     call.reject("No model loaded");
                     return;
                 }
+
+                Log.d(TAG, "Speech generated: " + outputFile.getAbsolutePath()
+                    + " (" + outputFile.length() + " bytes)");
 
                 JSObject ret = new JSObject();
                 ret.put("success", true);
                 ret.put("filePath", outputFile.getAbsolutePath());
                 call.resolve(ret);
 
-            } catch (Exception e) {
+            } catch (Throwable e) {
+                Log.e(TAG, "Speech generation failed: " + e.getMessage(), e);
                 JSObject ret = new JSObject();
                 ret.put("success", false);
                 ret.put("error", "Speech generation failed: " + e.getMessage());
@@ -146,10 +164,14 @@ public class TTSEnginePlugin extends Plugin {
             return;
         }
 
+        Log.d(TAG, "cloneVoice: text='" + text.substring(0, Math.min(text.length(), 50))
+            + "' ref=" + referenceAudioPath);
+
         executor.submit(() -> {
             try {
                 File refAudio = new File(referenceAudioPath);
                 if (!refAudio.exists()) {
+                    Log.e(TAG, "Reference audio not found: " + referenceAudioPath);
                     call.reject("Reference audio file not found: " + referenceAudioPath);
                     return;
                 }
@@ -167,16 +189,21 @@ public class TTSEnginePlugin extends Plugin {
                 } else if (qwen3TTS != null && qwen3TTS.isInitialized()) {
                     qwen3TTS.cloneVoice(text, refAudio, outputFile);
                 } else {
+                    Log.e(TAG, "No model loaded");
                     call.reject("No model loaded");
                     return;
                 }
+
+                Log.d(TAG, "Voice cloned: " + outputFile.getAbsolutePath()
+                    + " (" + outputFile.length() + " bytes)");
 
                 JSObject ret = new JSObject();
                 ret.put("success", true);
                 ret.put("filePath", outputFile.getAbsolutePath());
                 call.resolve(ret);
 
-            } catch (Exception e) {
+            } catch (Throwable e) {
+                Log.e(TAG, "Voice cloning failed: " + e.getMessage(), e);
                 JSObject ret = new JSObject();
                 ret.put("success", false);
                 ret.put("error", "Voice cloning failed: " + e.getMessage());
@@ -234,6 +261,7 @@ public class TTSEnginePlugin extends Plugin {
 
     @PluginMethod
     public void shutdown(PluginCall call) {
+        Log.d(TAG, "shutdown requested");
         shutdownInternal();
 
         JSObject ret = new JSObject();
@@ -252,5 +280,6 @@ public class TTSEnginePlugin extends Plugin {
         }
         currentModelId = null;
         engineRunning = false;
+        Log.d(TAG, "Engine shut down");
     }
 }
