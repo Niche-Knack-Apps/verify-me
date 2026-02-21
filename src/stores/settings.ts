@@ -85,8 +85,8 @@ export const useSettingsStore = defineStore('settings', () => {
     engineError.value = null;
     try {
       if (isCapacitor()) {
-        const TTSEngine = await getTTSEngine();
-        const ModelManager = await getModelManager();
+        const TTSEngine = getTTSEngine();
+        const ModelManager = getModelManager();
         const listResult = await ModelManager.listModels();
         const allModels = listResult.models ?? [];
         let available = allModels.find((m: any) => m.status === 'available');
@@ -133,7 +133,7 @@ export const useSettingsStore = defineStore('settings', () => {
   async function stopEngine() {
     try {
       if (isCapacitor()) {
-        const TTSEngine = await getTTSEngine();
+        const TTSEngine = getTTSEngine();
         await TTSEngine.shutdown();
         engineRunning.value = false;
       } else {
@@ -149,7 +149,7 @@ export const useSettingsStore = defineStore('settings', () => {
   async function checkEngineHealth() {
     try {
       if (isCapacitor()) {
-        const TTSEngine = await getTTSEngine();
+        const TTSEngine = getTTSEngine();
         const health = await TTSEngine.getHealth();
         engineRunning.value = health.engineRunning === true;
         if (health.device) {
@@ -172,7 +172,7 @@ export const useSettingsStore = defineStore('settings', () => {
   async function updateDeviceInfo() {
     try {
       if (isCapacitor()) {
-        const TTSEngine = await getTTSEngine();
+        const TTSEngine = getTTSEngine();
         const info = await TTSEngine.getDeviceInfo();
         if (info.name) {
           deviceType.value = info.name;
@@ -198,7 +198,7 @@ export const useSettingsStore = defineStore('settings', () => {
   async function loadModelsDirectory() {
     try {
       if (isCapacitor()) {
-        const ModelManager = await getModelManager();
+        const ModelManager = getModelManager();
         const result = await ModelManager.getModelsDirectory();
         modelsDirectory.value = result.path ?? '';
       } else {

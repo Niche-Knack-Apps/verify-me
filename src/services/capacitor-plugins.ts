@@ -1,37 +1,40 @@
 /**
  * Shared Capacitor plugin registry.
- * Uses a promise lock so concurrent callers share one registration.
+ * Plugins are initialized once at startup, then accessed synchronously.
+ * IMPORTANT: Capacitor plugin proxies intercept ALL property access,
+ * including .then(), so they must NEVER be returned from async functions
+ * or passed through await/Promise.resolve() — that triggers thenable
+ * detection which calls plugin.then() on the native side and crashes.
  */
 
-let _pluginsPromise: Promise<Record<string, any>> | null = null;
+let _plugins: Record<string, any> | null = null;
 
-function ensurePlugins(): Promise<Record<string, any>> {
-  if (!_pluginsPromise) {
-    _pluginsPromise = (async () => {
-      const { registerPlugin } = await import('@capacitor/core');
-      return {
-        ModelManager: registerPlugin('ModelManager'),
-        TTSEngine: registerPlugin('TTSEngine'),
-        AudioRecorder: registerPlugin('AudioRecorder'),
-      };
-    })();
-  }
-  return _pluginsPromise;
+/**
+ * Call once at startup (before app.mount) when running on Capacitor.
+ */
+export async function initCapacitorPlugins(): Promise<void> {
+  if (_plugins) return;
+  const { registerPlugin } = await import('@capacitor/core');
+  _plugins = {
+    ModelManager: registerPlugin('ModelManager'),
+    TTSEngine: registerPlugin('TTSEngine'),
+    AudioRecorder: registerPlugin('AudioRecorder'),
+  };
 }
 
-export async function getModelManager(): Promise<any> {
-  const p = await ensurePlugins();
-  return p.ModelManager;
+/** Synchronous getter — call initCapacitorPlugins() first. */
+export function getModelManager(): any {
+  return _plugins!.ModelManager;
 }
 
-export async function getTTSEngine(): Promise<any> {
-  const p = await ensurePlugins();
-  return p.TTSEngine;
+/** Synchronous getter — call initCapacitorPlugins() first. */
+export function getTTSEngine(): any {
+  return _plugins!.TTSEngine;
 }
 
-export async function getAudioRecorder(): Promise<any> {
-  const p = await ensurePlugins();
-  return p.AudioRecorder;
+/** Synchronous getter — call initCapacitorPlugins() first. */
+export function getAudioRecorder(): any {
+  return _plugins!.AudioRecorder;
 }
 
 export function isCapacitor(): boolean {

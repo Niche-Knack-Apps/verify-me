@@ -52,7 +52,7 @@ export const useTTSStore = defineStore('tts', () => {
 
   async function startCapacitorRecording() {
     try {
-      const AudioRecorder = await getAudioRecorder();
+      const AudioRecorder = getAudioRecorder();
       const result = await AudioRecorder.startRecording();
       if (!result.success) {
         error.value = result.error ?? 'Failed to start recording';
@@ -75,7 +75,7 @@ export const useTTSStore = defineStore('tts', () => {
 
   async function stopCapacitorRecording() {
     try {
-      const AudioRecorder = await getAudioRecorder();
+      const AudioRecorder = getAudioRecorder();
       const result = await AudioRecorder.stopRecording();
       if (result.success && result.filePath) {
         referenceAudioPath.value = result.filePath;
@@ -173,7 +173,7 @@ export const useTTSStore = defineStore('tts', () => {
   async function ensureEngineInitialized() {
     if (!isCapacitor()) return;
     if (initializedModelId.value === selectedModelId.value) return;
-    const TTSEngine = await getTTSEngine();
+    const TTSEngine = getTTSEngine();
     const result = await TTSEngine.initialize({ modelId: selectedModelId.value });
     if (result.success) {
       initializedModelId.value = selectedModelId.value;
@@ -206,7 +206,7 @@ export const useTTSStore = defineStore('tts', () => {
     try {
       if (isCapacitor()) {
         await ensureEngineInitialized();
-        const TTSEngine = await getTTSEngine();
+        const TTSEngine = getTTSEngine();
         const result = await TTSEngine.generateSpeech({
           text: text.value,
           voice: selectedVoice.value,
@@ -274,7 +274,7 @@ export const useTTSStore = defineStore('tts', () => {
     try {
       if (isCapacitor()) {
         await ensureEngineInitialized();
-        const TTSEngine = await getTTSEngine();
+        const TTSEngine = getTTSEngine();
         const result = await TTSEngine.cloneVoice({
           text: text.value,
           referenceAudioPath: referenceAudioPath.value,

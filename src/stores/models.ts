@@ -34,13 +34,7 @@ export const useModelsStore = defineStore('models', () => {
     loadError.value = null;
     try {
       if (isCapacitor()) {
-        console.log('[models] Getting ModelManager plugin...');
-        let ModelManager: any;
-        try {
-          ModelManager = await getModelManager();
-        } catch (pluginErr) {
-          throw new Error(`Plugin init failed: ${pluginErr}`);
-        }
+        const ModelManager = getModelManager();
         console.log('[models] Calling ModelManager.listModels...');
 
         // Timeout guard: if plugin doesn't respond in 10s, fail gracefully
@@ -89,7 +83,7 @@ export const useModelsStore = defineStore('models', () => {
       m.status === 'bundled' ? { ...m, status: 'extracting' as const } : m
     );
     try {
-      const ModelManager = await getModelManager();
+      const ModelManager = getModelManager();
       const result = await ModelManager.extractBundledModels();
       console.log('[models] extractBundledModels result:', JSON.stringify(result));
       if (result.errors) {
@@ -127,7 +121,7 @@ export const useModelsStore = defineStore('models', () => {
       );
 
       if (isCapacitor()) {
-        const ModelManager = await getModelManager();
+        const ModelManager = getModelManager();
         await ModelManager.downloadModel({ modelId });
       } else {
         const { invoke } = await import('@tauri-apps/api/core');
@@ -153,7 +147,7 @@ export const useModelsStore = defineStore('models', () => {
   async function cancelDownload(modelId: string) {
     try {
       if (isCapacitor()) {
-        const ModelManager = await getModelManager();
+        const ModelManager = getModelManager();
         await ModelManager.cancelDownload();
       }
       delete downloadProgress.value[modelId];
@@ -170,7 +164,7 @@ export const useModelsStore = defineStore('models', () => {
   async function deleteModel(id: string) {
     try {
       if (isCapacitor()) {
-        const ModelManager = await getModelManager();
+        const ModelManager = getModelManager();
         await ModelManager.deleteModel({ modelId: id });
       } else {
         const { invoke } = await import('@tauri-apps/api/core');
@@ -182,34 +176,31 @@ export const useModelsStore = defineStore('models', () => {
     }
   }
 
-  async function initEventListeners() {
-    try {
-      if (isCapacitor()) {
-        const ModelManager = await getModelManager();
-        await ModelManager.addListener('model-download-progress',
-          (data: { modelId: string; filename: string; percent: number }) => {
-            downloadProgress.value[data.modelId] = data.percent;
-            if (data.filename) {
-              downloadFilename.value[data.modelId] = data.filename;
-            }
+  function initEventListeners() {
+    if (isCapacitor()) {
+      const ModelManager = getModelManager();
+      ModelManager.addListener('model-download-progress',
+        (data: { modelId: string; filename: string; percent: number }) => {
+          downloadProgress.value[data.modelId] = data.percent;
+          if (data.filename) {
+            downloadFilename.value[data.modelId] = data.filename;
           }
-        );
-        await ModelManager.addListener('model-extracted',
-          (data: { modelId: string; status: string }) => {
-            const idx = models.value.findIndex(m => m.id === data.modelId);
-            if (idx !== -1) {
-              models.value[idx] = { ...models.value[idx], status: 'available' };
-            }
+        }
+      );
+      ModelManager.addListener('model-extracted',
+        (data: { modelId: string; status: string }) => {
+          const idx = models.value.findIndex(m => m.id === data.modelId);
+          if (idx !== -1) {
+            models.value[idx] = { ...models.value[idx], status: 'available' };
           }
-        );
-      } else {
-        const { listen } = await import('@tauri-apps/api/event');
-        await listen<{ filename: string; percent: number }>('model-download-progress', (event) => {
+        }
+      );
+    } else {
+      import('@tauri-apps/api/event').then(({ listen }) => {
+        listen<{ filename: string; percent: number }>('model-download-progress', (event) => {
           downloadProgress.value[event.payload.filename] = event.payload.percent;
         });
-      }
-    } catch (e) {
-      console.error('Failed to init model event listeners:', e);
+      }).catch(e => console.error('Failed to init model event listeners:', e));
     }
   }
 
