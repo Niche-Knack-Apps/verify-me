@@ -3,23 +3,12 @@ import { ref, computed, watch } from 'vue';
 import { useModelsStore } from './models';
 import type { Voice } from './models';
 
+import { isCapacitor, getTTSEngine, getAudioRecorder } from '@/services/capacitor-plugins';
+
 // Non-reactive recording internals
 let durationInterval: ReturnType<typeof setInterval> | null = null;
 let levelPollInterval: ReturnType<typeof setInterval> | null = null;
 let generatingTimer: ReturnType<typeof setInterval> | null = null;
-
-function isCapacitor(): boolean {
-  return 'Capacitor' in window;
-}
-
-let _ttsEngine: any = null;
-async function getTTSEngine() {
-  if (!_ttsEngine) {
-    const { registerPlugin } = await import('@capacitor/core');
-    _ttsEngine = registerPlugin('TTSEngine');
-  }
-  return _ttsEngine;
-}
 
 export const useTTSStore = defineStore('tts', () => {
   const modelsStore = useModelsStore();
@@ -63,12 +52,7 @@ export const useTTSStore = defineStore('tts', () => {
 
   async function startCapacitorRecording() {
     try {
-      const { Capacitor, registerPlugin } = await import('@capacitor/core');
-      const AudioRecorder = registerPlugin<{
-        startRecording: () => Promise<{ success: boolean; error?: string }>;
-        stopRecording: () => Promise<{ success: boolean; filePath?: string; error?: string }>;
-      }>('AudioRecorder');
-
+      const AudioRecorder = await getAudioRecorder();
       const result = await AudioRecorder.startRecording();
       if (!result.success) {
         error.value = result.error ?? 'Failed to start recording';
@@ -91,11 +75,7 @@ export const useTTSStore = defineStore('tts', () => {
 
   async function stopCapacitorRecording() {
     try {
-      const { registerPlugin } = await import('@capacitor/core');
-      const AudioRecorder = registerPlugin<{
-        stopRecording: () => Promise<{ success: boolean; filePath?: string; error?: string }>;
-      }>('AudioRecorder');
-
+      const AudioRecorder = await getAudioRecorder();
       const result = await AudioRecorder.stopRecording();
       if (result.success && result.filePath) {
         referenceAudioPath.value = result.filePath;

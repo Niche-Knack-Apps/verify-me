@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue';
+import { computed } from 'vue';
 import { useModelsStore } from '@/stores/models';
 import { useSettingsStore } from '@/stores/settings';
 import type { TTSModel } from '@/stores/models';
@@ -21,12 +21,6 @@ const filteredModels = computed(() => {
     return modelsStore.models.filter(props.modelFilter);
   }
   return modelsStore.models;
-});
-
-onMounted(() => {
-  if (modelsStore.models.length === 0) {
-    modelsStore.loadModels();
-  }
 });
 </script>
 

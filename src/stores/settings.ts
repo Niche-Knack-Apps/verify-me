@@ -1,27 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-
-function isCapacitor(): boolean {
-  return 'Capacitor' in window;
-}
-
-let _ttsEngine: any = null;
-async function getTTSEngine() {
-  if (!_ttsEngine) {
-    const { registerPlugin } = await import('@capacitor/core');
-    _ttsEngine = registerPlugin('TTSEngine');
-  }
-  return _ttsEngine;
-}
-
-let _modelManager: any = null;
-async function getModelManager() {
-  if (!_modelManager) {
-    const { registerPlugin } = await import('@capacitor/core');
-    _modelManager = registerPlugin('ModelManager');
-  }
-  return _modelManager;
-}
+import { isCapacitor, getTTSEngine, getModelManager } from '@/services/capacitor-plugins';
 
 export type ThemeMode = 'modern' | 'eighties';
 

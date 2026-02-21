@@ -1,18 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
-
-function isCapacitor(): boolean {
-  return 'Capacitor' in window;
-}
-
-let _modelManager: any = null;
-async function getModelManager() {
-  if (!_modelManager) {
-    const { registerPlugin } = await import('@capacitor/core');
-    _modelManager = registerPlugin('ModelManager');
-  }
-  return _modelManager;
-}
+import { isCapacitor, getModelManager } from '@/services/capacitor-plugins';
 
 export interface Voice {
   id: string;
@@ -41,11 +29,18 @@ export const useModelsStore = defineStore('models', () => {
   const downloadFilename = ref<Record<string, string>>({});
 
   async function loadModels() {
+    if (loading.value) return; // prevent concurrent calls
     loading.value = true;
     loadError.value = null;
     try {
       if (isCapacitor()) {
-        const ModelManager = await getModelManager();
+        console.log('[models] Getting ModelManager plugin...');
+        let ModelManager: any;
+        try {
+          ModelManager = await getModelManager();
+        } catch (pluginErr) {
+          throw new Error(`Plugin init failed: ${pluginErr}`);
+        }
         console.log('[models] Calling ModelManager.listModels...');
 
         // Timeout guard: if plugin doesn't respond in 10s, fail gracefully
@@ -57,7 +52,7 @@ export const useModelsStore = defineStore('models', () => {
         ]) as any;
 
         console.log('[models] listModels raw result:', JSON.stringify(result));
-        const raw = result.models ?? [];
+        const raw = result?.models ?? [];
         if (raw.length === 0) {
           loadError.value = 'Plugin returned 0 models. Check logcat for ModelManager errors.';
         }
